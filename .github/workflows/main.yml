@@ -1,0 +1,168 @@
+name: Build Live TV Player
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-qt5-static
+            mingw-w64-x86_64-mpv
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-pkg-config
+            pkg-config
+
+      - name: Cache MSYS2 packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:/msys64/mingw64/lib
+            C:/msys64/mingw64/include
+            C:/msys64/mingw64/bin
+            C:/msys64/mingw64/qt5-static
+            C:/msys64/mingw64/share
+            C:/msys64/var/cache/pacman/pkg
+          key: msys2-mingw64-${{ hashFiles('.github/workflows/*.yml') }}
+          restore-keys: |
+            msys2-mingw64-
+
+      - name: Verify dependencies
+        run: |
+          echo "=== GCC ==="
+          g++ --version | head -1
+
+          echo "=== Qt5 Static ==="
+          ls /mingw64/qt5-static/bin/moc.exe && echo "MOC: OK" || echo "MOC: MISSING"
+          ls /mingw64/qt5-static/lib/libQt5Core.a && echo "Qt5Core: OK" || echo "Qt5Core: MISSING"
+          ls /mingw64/qt5-static/lib/libQt5Network.a && echo "Qt5Network: OK" || echo "Qt5Network: MISSING"
+          ls /mingw64/qt5-static/lib/libQt5Widgets.a && echo "Qt5Widgets: OK" || echo "Qt5Widgets: MISSING"
+          ls /mingw64/qt5-static/lib/libQt5Gui.a && echo "Qt5Gui: OK" || echo "Qt5Gui: MISSING"
+
+          echo "=== mpv ==="
+          ls /mingw64/include/mpv/client.h && echo "mpv headers: OK" || echo "mpv headers: MISSING"
+          ls /mingw64/lib/libmpv.dll.a && echo "mpv lib (dll.a): OK" || ls /mingw64/lib/libmpv.a && echo "mpv lib (.a): OK" || echo "mpv lib: MISSING"
+
+          echo "=== OpenSSL ==="
+          ls /mingw64/lib/libssl.a && echo "OpenSSL static: OK" || echo "OpenSSL static: MISSING"
+
+      - name: Run MOC
+        run: |
+          /mingw64/qt5-static/bin/moc main.cpp -o main.moc
+
+      - name: Compile
+        run: |
+          QT5="/mingw64/qt5-static"
+
+          NETWORK_PLUGIN=""
+          if [ -f "${QT5}/share/qt5/plugins/network/libqgenericbearer.a" ]; then
+            NETWORK_PLUGIN="${QT5}/share/qt5/plugins/network/libqgenericbearer.a"
+          fi
+
+          STYLE_PLUGIN=""
+          if [ -f "${QT5}/share/qt5/plugins/styles/libqwindowsvistastyle.a" ]; then
+            STYLE_PLUGIN="${QT5}/share/qt5/plugins/styles/libqwindowsvistastyle.a"
+          fi
+
+          TLS_PLUGIN=""
+          if [ -f "${QT5}/share/qt5/plugins/tls/libqopensslbackend.a" ]; then
+            TLS_PLUGIN="${QT5}/share/qt5/plugins/tls/libqopensslbackend.a"
+          fi
+
+          g++ -std=c++14 -O2 -DNDEBUG \
+            -I"${QT5}/include" \
+            -I"${QT5}/include/QtCore" \
+            -I"${QT5}/include/QtGui" \
+            -I"${QT5}/include/QtWidgets" \
+            -I"${QT5}/include/QtNetwork" \
+            -I/mingw64/include \
+            -DQT_STATICPLUGIN \
+            -DQT_STATIC \
+            main.cpp \
+            -o LiveTVPlayer.exe \
+            -Wl,--start-group \
+            ${QT5}/share/qt5/plugins/platforms/libqwindows.a \
+            ${NETWORK_PLUGIN} \
+            ${STYLE_PLUGIN} \
+            ${TLS_PLUGIN} \
+            ${QT5}/lib/libQt5EventDispatcherSupport.a \
+            ${QT5}/lib/libQt5FontDatabaseSupport.a \
+            ${QT5}/lib/libQt5ThemeSupport.a \
+            ${QT5}/lib/libQt5WindowsUIAutomationSupport.a \
+            ${QT5}/lib/libQt5AccessibilitySupport.a \
+            ${QT5}/lib/libQt5VulkanSupport.a \
+            ${QT5}/lib/libQt5Widgets.a \
+            ${QT5}/lib/libQt5Gui.a \
+            ${QT5}/lib/libQt5Network.a \
+            ${QT5}/lib/libQt5Core.a \
+            -L/mingw64/lib -lmpv \
+            -lssl -lcrypto -lcrypt32 \
+            -lharfbuzz -lfreetype -lbrotlidec -lbrotlicommon -lgraphite2 \
+            -lpng16 -ljpeg -lz -lzstd -lbz2 -lb2 -lpcre2-16 \
+            -lxml2 -liconv -llzma \
+            -ldwrite -ldwmapi -lwtsapi32 \
+            -lole32 -loleaut32 -luuid -lcomdlg32 \
+            -lgdi32 -luser32 -lkernel32 -lshell32 \
+            -ladvapi32 -lws2_32 -lmswsock \
+            -lwinspool -lshlwapi -lversion \
+            -luxtheme -limm32 -lwinmm \
+            -lnetapi32 -luserenv -ldbghelp \
+            -ld3d11 -ldxgi -ldxguid \
+            -lrpcrt4 -liphlpapi -lsecur32 \
+            -lntdll -lpsapi \
+            -Wl,--end-group \
+            -static-libgcc -static-libstdc++ \
+            -Wl,--subsystem,windows
+
+      - name: Collect mpv DLLs
+        run: |
+          mkdir -p dist
+
+          cp LiveTVPlayer.exe dist/
+
+          copy_dll_recursive() {
+            local binary="$1"
+            local dest="$2"
+            local dlls
+            dlls=$(objdump -p "$binary" 2>/dev/null | grep "DLL Name:" | awk '{print $3}' | sort -u)
+            for dll in $dlls; do
+              if [ -f "/mingw64/bin/${dll}" ] && [ ! -f "${dest}/${dll}" ]; then
+                cp "/mingw64/bin/${dll}" "${dest}/"
+                copy_dll_recursive "${dest}/${dll}" "${dest}"
+              fi
+            done
+          }
+
+          copy_dll_recursive "LiveTVPlayer.exe" "dist"
+
+          echo "=== Collected files ==="
+          ls -lh dist/
+          echo ""
+          echo "=== Total size ==="
+          du -sh dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiveTVPlayer-win64
+          path: dist/
+          retention-days: 30
+          compression-level: 9
