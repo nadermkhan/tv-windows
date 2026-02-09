@@ -12,7 +12,6 @@
 #include <QPushButton>
 #include <QLabel>
 #include <QStatusBar>
-#include <QMenuBar>
 #include <QMessageBox>
 #include <QTimer>
 #include <QSettings>
@@ -38,13 +37,15 @@
 #include <QStringList>
 #include <QRegularExpression>
 #include <QFrame>
-#include <QGraphicsOpacityEffect>
 #include <QPropertyAnimation>
 #include <QClipboard>
 #include <QGuiApplication>
 #include <QScreen>
 #include <QScrollBar>
-#include <QCache>
+#include <QPainterPath>
+#include <QGraphicsDropShadowEffect>
+#include <QToolButton>
+#include <QStackedWidget>
 #include <QtGlobal>
 
 #ifdef Q_OS_WIN
@@ -56,15 +57,16 @@
 #include <cstring>
 #include <algorithm>
 
-static const char* DEFAULT_PLAYLIST_URL = "https://m3u.work/jwuF5FPp.m3u";
+static const char* PLAYLIST_URL = "https://m3u.work/jwuF5FPp.m3u";
 static const int MAX_DOWNLOAD_SIZE = 10 * 1024 * 1024;
-static const int PLAYLIST_TIMEOUT_MS = 12000;
+static const int PLAYLIST_TIMEOUT_MS = 15000;
 static const int IMAGE_TIMEOUT_MS = 6000;
-static const int MAX_CONCURRENT_DOWNLOADS = 6;
+static const int MAX_CONCURRENT_DOWNLOADS = 8;
 static const int DEBOUNCE_MS = 150;
-static const int OSD_DISPLAY_MS = 3000;
-static const int AUTOHIDE_MS = 2500;
+static const int OSD_DISPLAY_MS = 3500;
+static const int AUTOHIDE_MS = 3000;
 static const int MAX_NAME_LEN = 200;
+static const int STATUS_CHECK_INTERVAL_MS = 30000;
 
 struct Channel {
     QString name;
@@ -80,6 +82,8 @@ enum ChannelRoles {
     StreamUrlRole,
     IndexRole
 };
+
+// ─── Channel Model ───────────────────────────────────────────────
 
 class ChannelModel : public QAbstractListModel {
     Q_OBJECT
@@ -103,31 +107,18 @@ public:
         const Channel& ch = m_channels[index.row()];
         switch (role) {
             case Qt::DisplayRole:
-            case NameRole:
-                return ch.name;
-            case CategoryRole:
-                return ch.category;
-            case LogoUrlRole:
-                return ch.logoUrl;
-            case StreamUrlRole:
-                return ch.streamUrl;
-            case IndexRole:
-                return index.row();
-            case Qt::DecorationRole:
-                return QVariant();
-            default:
-                return QVariant();
+            case NameRole: return ch.name;
+            case CategoryRole: return ch.category;
+            case LogoUrlRole: return ch.logoUrl;
+            case StreamUrlRole: return ch.streamUrl;
+            case IndexRole: return index.row();
+            default: return QVariant();
         }
     }
 
     QHash<int, QByteArray> roleNames() const override {
-        QHash<int, QByteArray> roles;
-        roles[NameRole] = "channelName";
-        roles[CategoryRole] = "category";
-        roles[LogoUrlRole] = "logoUrl";
-        roles[StreamUrlRole] = "streamUrl";
-        roles[IndexRole] = "channelIndex";
-        return roles;
+        return {{NameRole, "channelName"}, {CategoryRole, "category"},
+                {LogoUrlRole, "logoUrl"}, {StreamUrlRole, "streamUrl"}, {IndexRole, "channelIndex"}};
     }
 
     const QVector<Channel>& channels() const { return m_channels; }
@@ -136,39 +127,27 @@ private:
     QVector<Channel> m_channels;
 };
 
+// ─── Category Filter Proxy ───────────────────────────────────────
+
 class CategoryFilterProxy : public QSortFilterProxyModel {
     Q_OBJECT
 public:
     explicit CategoryFilterProxy(QObject* parent = nullptr) : QSortFilterProxyModel(parent) {}
 
-    void setCategoryFilter(const QString& cat) {
-        m_category = cat;
-        invalidateFilter();
-    }
-
-    void setSearchFilter(const QString& search) {
-        m_search = search.toLower();
-        invalidateFilter();
-    }
-
+    void setCategoryFilter(const QString& cat) { m_category = cat; invalidateFilter(); }
+    void setSearchFilter(const QString& search) { m_search = search.toLower(); invalidateFilter(); }
     QString categoryFilter() const { return m_category; }
-    QString searchFilter() const { return m_search; }
 
 protected:
     bool filterAcceptsRow(int sourceRow, const QModelIndex& sourceParent) const override {
         QModelIndex idx = sourceModel()->index(sourceRow, 0, sourceParent);
         if (!idx.isValid()) return false;
-
         if (!m_category.isEmpty() && m_category != "All") {
-            QString cat = idx.data(CategoryRole).toString();
-            if (cat != m_category) return false;
+            if (idx.data(CategoryRole).toString() != m_category) return false;
         }
-
         if (!m_search.isEmpty()) {
-            QString name = idx.data(NameRole).toString().toLower();
-            if (!name.contains(m_search)) return false;
+            if (!idx.data(NameRole).toString().toLower().contains(m_search)) return false;
         }
-
         return true;
     }
 
@@ -177,72 +156,101 @@ private:
     QString m_search;
 };
 
+// ─── Channel Delegate ────────────────────────────────────────────
+
 class ChannelDelegate : public QStyledItemDelegate {
     Q_OBJECT
 public:
     explicit ChannelDelegate(QObject* parent = nullptr) : QStyledItemDelegate(parent) {}
-
     void setLogoCache(QHash<QString, QPixmap>* cache) { m_logoCache = cache; }
 
     QSize sizeHint(const QStyleOptionViewItem&, const QModelIndex&) const override {
-        return QSize(180, 80);
+        return QSize(172, 100);
     }
 
     void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override {
         painter->save();
+        painter->setRenderHint(QPainter::Antialiasing, true);
 
+        QRect r = option.rect.adjusted(3, 3, -3, -3);
+        QPainterPath path;
+        path.addRoundedRect(QRectF(r), 10, 10);
+
+        // Card background
+        QColor cardBg(38, 40, 58);
         if (option.state & QStyle::State_Selected) {
-            painter->fillRect(option.rect, QColor(0, 120, 215));
+            cardBg = QColor(59, 130, 246);
         } else if (option.state & QStyle::State_MouseOver) {
-            painter->fillRect(option.rect, QColor(60, 60, 80));
-        } else {
-            painter->fillRect(option.rect, QColor(40, 40, 55));
+            cardBg = QColor(50, 54, 78);
         }
 
-        painter->setPen(QColor(80, 80, 100));
-        painter->drawRect(option.rect.adjusted(0, 0, -1, -1));
+        painter->fillPath(path, cardBg);
 
-        QRect iconRect(option.rect.left() + 5, option.rect.top() + 5, 60, 45);
+        // Subtle border
+        painter->setPen(QPen(QColor(255, 255, 255, 15), 1));
+        painter->drawPath(path);
+
+        // Logo area
+        QRect iconRect(r.left() + 10, r.top() + 8, 52, 42);
         QString logoUrl = index.data(LogoUrlRole).toString();
         QString name = index.data(NameRole).toString();
-        if (name.length() > MAX_NAME_LEN) name = name.left(MAX_NAME_LEN) + "...";
+        if (name.length() > MAX_NAME_LEN) name = name.left(MAX_NAME_LEN) + "…";
+        QString category = index.data(CategoryRole).toString();
 
         bool drawn = false;
         if (m_logoCache && !logoUrl.isEmpty() && m_logoCache->contains(logoUrl)) {
             QPixmap pm = m_logoCache->value(logoUrl);
             if (!pm.isNull()) {
-                painter->drawPixmap(iconRect, pm.scaled(iconRect.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                QPainterPath clipPath;
+                clipPath.addRoundedRect(QRectF(iconRect), 6, 6);
+                painter->setClipPath(clipPath);
+                QPixmap scaled = pm.scaled(iconRect.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                int dx = iconRect.left() + (iconRect.width() - scaled.width()) / 2;
+                int dy = iconRect.top() + (iconRect.height() - scaled.height()) / 2;
+                painter->drawPixmap(dx, dy, scaled);
+                painter->setClipping(false);
                 drawn = true;
             }
         }
 
         if (!drawn) {
-            QColor bgColor;
-            if (!name.isEmpty()) {
-                int h = qAbs(name.at(0).unicode() * 37) % 360;
-                bgColor = QColor::fromHsv(h, 120, 100);
-            } else {
-                bgColor = QColor(80, 80, 80);
-            }
-            painter->fillRect(iconRect, bgColor);
-            painter->setPen(Qt::white);
+            QPainterPath clipPath;
+            clipPath.addRoundedRect(QRectF(iconRect), 6, 6);
+            int h = name.isEmpty() ? 200 : qAbs(name.at(0).unicode() * 47) % 360;
+            QLinearGradient grad(iconRect.topLeft(), iconRect.bottomRight());
+            grad.setColorAt(0, QColor::fromHsv(h, 140, 120));
+            grad.setColorAt(1, QColor::fromHsv((h + 40) % 360, 120, 90));
+            painter->fillPath(clipPath, grad);
+            painter->setPen(QColor(255, 255, 255, 220));
             QFont f = painter->font();
             f.setPixelSize(20);
             f.setBold(true);
             painter->setFont(f);
-            QString letter = name.isEmpty() ? "?" : name.left(1).toUpper();
-            painter->drawText(iconRect, Qt::AlignCenter, letter);
+            painter->drawText(iconRect, Qt::AlignCenter, name.isEmpty() ? "?" : name.left(1).toUpper());
         }
 
-        painter->setPen(Qt::white);
-        QFont textFont = painter->font();
-        textFont.setPixelSize(12);
-        textFont.setBold(false);
-        painter->setFont(textFont);
+        // Channel name
+        painter->setPen(QColor(240, 240, 245));
+        QFont nameFont = painter->font();
+        nameFont.setPixelSize(11);
+        nameFont.setBold(true);
+        nameFont.setFamily("Segoe UI, SF Pro Display, Helvetica Neue, Arial");
+        painter->setFont(nameFont);
+        QRect nameRect(r.left() + 8, r.top() + 56, r.width() - 16, 18);
+        QString elidedName = painter->fontMetrics().elidedText(name, Qt::ElideRight, nameRect.width());
+        painter->drawText(nameRect, Qt::AlignLeft | Qt::AlignVCenter, elidedName);
 
-        QRect textRect(option.rect.left() + 5, option.rect.top() + 55, option.rect.width() - 10, 20);
-        QString elidedName = painter->fontMetrics().elidedText(name, Qt::ElideRight, textRect.width());
-        painter->drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, elidedName);
+        // Category tag
+        if (!category.isEmpty()) {
+            painter->setPen(QColor(148, 163, 184));
+            QFont catFont = nameFont;
+            catFont.setPixelSize(9);
+            catFont.setBold(false);
+            painter->setFont(catFont);
+            QRect catRect(r.left() + 8, r.top() + 76, r.width() - 16, 14);
+            QString elidedCat = painter->fontMetrics().elidedText(category, Qt::ElideRight, catRect.width());
+            painter->drawText(catRect, Qt::AlignLeft | Qt::AlignVCenter, elidedCat);
+        }
 
         painter->restore();
     }
@@ -250,6 +258,8 @@ public:
 private:
     QHash<QString, QPixmap>* m_logoCache = nullptr;
 };
+
+// ─── OSD Widget ──────────────────────────────────────────────────
 
 class OsdWidget : public QWidget {
     Q_OBJECT
@@ -261,7 +271,12 @@ public:
         hide();
         m_hideTimer = new QTimer(this);
         m_hideTimer->setSingleShot(true);
-        connect(m_hideTimer, &QTimer::timeout, this, &OsdWidget::hide);
+        connect(m_hideTimer, &QTimer::timeout, this, [this]() {
+            // Fade out
+            m_opacity = 0.0;
+            hide();
+        });
+        m_opacity = 1.0;
     }
 
     void showOsd(const QString& channelName, const QString& category, int index, int total) {
@@ -269,6 +284,7 @@ public:
         m_category = category;
         m_index = index;
         m_total = total;
+        m_opacity = 1.0;
         show();
         raise();
         update();
@@ -279,33 +295,42 @@ protected:
     void paintEvent(QPaintEvent*) override {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
+        p.setOpacity(m_opacity);
 
-        int boxW = qMin(width() - 40, 500);
-        int boxH = 80;
+        int boxW = qMin(width() - 60, 520);
+        int boxH = 90;
         int x = (width() - boxW) / 2;
-        int y = height() - boxH - 40;
+        int y = height() - boxH - 50;
 
-        p.setBrush(QColor(0, 0, 0, 200));
+        // Glassmorphism background
+        QPainterPath bgPath;
+        bgPath.addRoundedRect(x, y, boxW, boxH, 16, 16);
+        p.fillPath(bgPath, QColor(15, 15, 30, 210));
+        p.setPen(QPen(QColor(255, 255, 255, 30), 1));
+        p.drawPath(bgPath);
+
+        // Accent line
         p.setPen(Qt::NoPen);
-        p.drawRoundedRect(x, y, boxW, boxH, 10, 10);
+        p.setBrush(QColor(99, 102, 241));
+        p.drawRoundedRect(x + 16, y + 14, 4, boxH - 28, 2, 2);
 
+        // Channel name
         p.setPen(Qt::white);
         QFont f = font();
-        f.setPixelSize(22);
+        f.setPixelSize(20);
         f.setBold(true);
         p.setFont(f);
-        QString elidedName = p.fontMetrics().elidedText(m_channelName, Qt::ElideRight, boxW - 20);
-        p.drawText(x + 10, y + 10, boxW - 20, 30, Qt::AlignLeft | Qt::AlignVCenter, elidedName);
+        QString elidedName = p.fontMetrics().elidedText(m_channelName, Qt::ElideRight, boxW - 50);
+        p.drawText(x + 30, y + 16, boxW - 50, 30, Qt::AlignLeft | Qt::AlignVCenter, elidedName);
 
-        f.setPixelSize(14);
+        // Info line
+        f.setPixelSize(13);
         f.setBold(false);
         p.setFont(f);
-        p.setPen(QColor(180, 180, 200));
+        p.setPen(QColor(165, 180, 210));
         QString info = m_category;
-        if (m_total > 0) {
-            info += QString("  |  %1/%2").arg(m_index + 1).arg(m_total);
-        }
-        p.drawText(x + 10, y + 45, boxW - 20, 25, Qt::AlignLeft | Qt::AlignVCenter, info);
+        if (m_total > 0) info += QString("  ·  %1 of %2").arg(m_index + 1).arg(m_total);
+        p.drawText(x + 30, y + 50, boxW - 50, 24, Qt::AlignLeft | Qt::AlignVCenter, info);
     }
 
 private:
@@ -314,7 +339,10 @@ private:
     QString m_category;
     int m_index = 0;
     int m_total = 0;
+    qreal m_opacity = 1.0;
 };
+
+// ─── Video Widget ────────────────────────────────────────────────
 
 class VideoWidget : public QWidget {
     Q_OBJECT
@@ -323,10 +351,111 @@ public:
         setAttribute(Qt::WA_DontCreateNativeAncestors);
         setAttribute(Qt::WA_NativeWindow);
         setMinimumSize(320, 240);
-        setStyleSheet("background-color: black;");
+        setStyleSheet("background-color: #000;");
         setFocusPolicy(Qt::NoFocus);
+        setMouseTracking(true);
+    }
+
+signals:
+    void doubleClicked();
+
+protected:
+    void mouseDoubleClickEvent(QMouseEvent* event) override {
+        emit doubleClicked();
+        QWidget::mouseDoubleClickEvent(event);
     }
 };
+
+// ─── Status Indicator Widget ─────────────────────────────────────
+
+class StatusIndicator : public QWidget {
+    Q_OBJECT
+    Q_PROPERTY(QColor dotColor READ dotColor WRITE setDotColor)
+public:
+    enum Status { Offline, Connecting, Online };
+
+    explicit StatusIndicator(QWidget* parent = nullptr) : QWidget(parent), m_status(Offline) {
+        setFixedSize(140, 32);
+        m_dotColor = QColor(239, 68, 68);
+        m_pulseTimer = new QTimer(this);
+        m_pulseTimer->setInterval(1200);
+        connect(m_pulseTimer, &QTimer::timeout, this, [this]() {
+            m_pulsePhase = !m_pulsePhase;
+            update();
+        });
+    }
+
+    void setStatus(Status s) {
+        m_status = s;
+        switch (s) {
+            case Offline:
+                m_dotColor = QColor(239, 68, 68);
+                m_statusText = "Offline";
+                m_pulseTimer->stop();
+                break;
+            case Connecting:
+                m_dotColor = QColor(251, 191, 36);
+                m_statusText = "Connecting…";
+                m_pulseTimer->start();
+                break;
+            case Online:
+                m_dotColor = QColor(34, 197, 94);
+                m_statusText = "Online";
+                m_pulseTimer->stop();
+                break;
+        }
+        update();
+    }
+
+    Status status() const { return m_status; }
+    QColor dotColor() const { return m_dotColor; }
+    void setDotColor(const QColor& c) { m_dotColor = c; update(); }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+
+        // Background pill
+        QPainterPath bg;
+        bg.addRoundedRect(rect().adjusted(1, 1, -1, -1), 14, 14);
+        p.fillPath(bg, QColor(30, 32, 48, 200));
+        p.setPen(QPen(QColor(255, 255, 255, 20), 1));
+        p.drawPath(bg);
+
+        // Pulse ring for connecting
+        int dotX = 16, dotY = height() / 2;
+        if (m_status == Connecting && m_pulsePhase) {
+            p.setPen(Qt::NoPen);
+            QColor pulse = m_dotColor;
+            pulse.setAlpha(60);
+            p.setBrush(pulse);
+            p.drawEllipse(QPoint(dotX, dotY), 8, 8);
+        }
+
+        // Dot
+        p.setPen(Qt::NoPen);
+        p.setBrush(m_dotColor);
+        p.drawEllipse(QPoint(dotX, dotY), 5, 5);
+
+        // Text
+        p.setPen(QColor(220, 225, 235));
+        QFont f = font();
+        f.setPixelSize(11);
+        f.setBold(true);
+        p.setFont(f);
+        p.drawText(QRect(30, 0, width() - 36, height()), Qt::AlignLeft | Qt::AlignVCenter, m_statusText);
+    }
+
+private:
+    Status m_status;
+    QColor m_dotColor;
+    QString m_statusText = "Offline";
+    QTimer* m_pulseTimer;
+    bool m_pulsePhase = false;
+};
+
+// ─── Main Window ─────────────────────────────────────────────────
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -334,10 +463,11 @@ public:
     explicit MainWindow(QWidget* parent = nullptr) : QMainWindow(parent) {
         setWindowTitle("Live TV Player");
         resize(1280, 720);
-        setMinimumSize(800, 500);
+        setMinimumSize(900, 550);
 
         m_nam = new QNetworkAccessManager(this);
         m_logoNam = new QNetworkAccessManager(this);
+
         m_debounceTimer = new QTimer(this);
         m_debounceTimer->setSingleShot(true);
         m_debounceTimer->setInterval(DEBOUNCE_MS);
@@ -353,10 +483,21 @@ public:
         m_searchDebounce->setInterval(200);
         connect(m_searchDebounce, &QTimer::timeout, this, &MainWindow::applySearch);
 
+        m_statusCheckTimer = new QTimer(this);
+        m_statusCheckTimer->setInterval(STATUS_CHECK_INTERVAL_MS);
+        connect(m_statusCheckTimer, &QTimer::timeout, this, &MainWindow::checkOnlineStatus);
+
         setupUi();
         setupMpv();
         loadSettings();
-        applyDarkTheme();
+        applyModernTheme();
+
+        // Auto-fetch playlist on startup
+        QTimer::singleShot(300, this, [this]() {
+            fetchPlaylist(PLAYLIST_URL);
+        });
+
+        m_statusCheckTimer->start();
     }
 
     ~MainWindow() override {
@@ -370,15 +511,13 @@ public:
 protected:
     void keyPressEvent(QKeyEvent* event) override {
         resetAutoHide();
-
         switch (event->key()) {
             case Qt::Key_F11:
+            case Qt::Key_F:
                 toggleFullscreen();
                 break;
             case Qt::Key_Escape:
-                if (isFullScreen()) {
-                    showNormal();
-                }
+                if (m_isFullscreen) exitFullscreen();
                 break;
             case Qt::Key_Up:
                 zapChannel(-1);
@@ -398,13 +537,11 @@ protected:
             case Qt::Key_Space:
                 togglePause();
                 break;
-            case Qt::Key_Return:
-            case Qt::Key_Enter:
-                toggleTvMode();
+            case Qt::Key_Tab:
+                toggleSidebar();
                 break;
             default:
                 QMainWindow::keyPressEvent(event);
-                break;
         }
     }
 
@@ -415,47 +552,21 @@ protected:
 
     void resizeEvent(QResizeEvent* event) override {
         QMainWindow::resizeEvent(event);
-        if (m_osd) {
-            m_osd->setGeometry(m_videoWidget->rect());
-        }
+        if (m_osd) m_osd->setGeometry(m_videoWidget->rect());
     }
 
     bool eventFilter(QObject* obj, QEvent* event) override {
-        if (event->type() == QEvent::MouseMove) {
-            resetAutoHide();
-        }
+        if (event->type() == QEvent::MouseMove) resetAutoHide();
         return QMainWindow::eventFilter(obj, event);
     }
 
 private slots:
-    void onLoadClicked() {
-        QString url = m_urlEdit->text().trimmed();
-        if (url.isEmpty()) {
-            QMessageBox::warning(this, "Error", "Please enter a playlist URL.");
-            return;
-        }
-        fetchPlaylist(url);
-    }
-
-    void onPasteClicked() {
-        QClipboard* cb = QGuiApplication::clipboard();
-        if (cb) {
-            QString text = cb->text().trimmed();
-            if (!text.isEmpty()) {
-                m_urlEdit->setText(text);
-            }
-        }
-    }
-
-    void onDefaultClicked() {
-        m_urlEdit->setText(DEFAULT_PLAYLIST_URL);
-    }
-
     void onCategoryChanged(int row) {
         if (row < 0 || row >= m_categoryList->count()) return;
         QString cat = m_categoryList->item(row)->text();
         m_proxyModel->setCategoryFilter(cat);
         m_currentCategory = cat;
+        updateChannelCount();
     }
 
     void onChannelClicked(const QModelIndex& index) {
@@ -470,39 +581,38 @@ private slots:
 
     void doPlayChannel() {
         if (m_pendingStreamUrl.isEmpty()) return;
+        m_statusIndicator->setStatus(StatusIndicator::Connecting);
         playStream(m_pendingStreamUrl);
         m_currentChannelName = m_pendingChannelName;
         m_currentStreamUrl = m_pendingStreamUrl;
-        statusBar()->showMessage(m_currentChannelName);
-        if (m_osd) {
-            m_osd->showOsd(m_pendingChannelName, m_pendingCategory, m_pendingIndex, m_pendingTotal);
-        }
+        m_nowPlayingLabel->setText("  ▶ " + m_currentChannelName);
+        if (m_osd) m_osd->showOsd(m_pendingChannelName, m_pendingCategory, m_pendingIndex, m_pendingTotal);
     }
 
-    void onSearchChanged(const QString&) {
-        m_searchDebounce->start();
-    }
+    void onSearchChanged(const QString&) { m_searchDebounce->start(); }
 
     void applySearch() {
         m_proxyModel->setSearchFilter(m_searchEdit->text().trimmed());
+        updateChannelCount();
     }
 
     void onMpvWakeup() {
         while (m_mpv) {
             mpv_event* event = mpv_wait_event(m_mpv, 0);
-            if (!event || event->event_id == MPV_EVENT_NONE)
-                break;
+            if (!event || event->event_id == MPV_EVENT_NONE) break;
             switch (event->event_id) {
                 case MPV_EVENT_SHUTDOWN:
                     break;
                 case MPV_EVENT_END_FILE: {
-                    mpv_event_end_file* ef = static_cast<mpv_event_end_file*>(event->data);
+                    auto* ef = static_cast<mpv_event_end_file*>(event->data);
                     if (ef && ef->reason == MPV_END_FILE_REASON_ERROR) {
+                        m_statusIndicator->setStatus(StatusIndicator::Offline);
                         statusBar()->showMessage("Playback error: " + m_currentChannelName);
                     }
                     break;
                 }
                 case MPV_EVENT_FILE_LOADED:
+                    m_statusIndicator->setStatus(StatusIndicator::Online);
                     statusBar()->showMessage("Playing: " + m_currentChannelName);
                     break;
                 default:
@@ -511,111 +621,250 @@ private slots:
         }
     }
 
-    void toggleTvMode() {
-        m_tvMode = !m_tvMode;
-        if (m_tvMode) {
-            showPanels();
-            resetAutoHide();
+    void toggleSidebar() {
+        if (m_leftPanel->isVisible()) {
+            m_leftPanel->hide();
         } else {
-            m_autoHideTimer->stop();
-            showPanels();
+            m_leftPanel->show();
         }
     }
 
     void hidePanels() {
-        if (!m_tvMode) return;
+        if (!m_isFullscreen) return;
         if (m_leftPanel) m_leftPanel->hide();
-        if (m_topBar) m_topBar->hide();
+        if (m_headerBar) m_headerBar->hide();
+        if (m_channelView) m_channelView->hide();
+        setCursor(Qt::BlankCursor);
     }
 
     void showPanels() {
         if (m_leftPanel) m_leftPanel->show();
-        if (m_topBar) m_topBar->show();
+        if (m_headerBar) m_headerBar->show();
+        if (m_channelView) m_channelView->show();
+        setCursor(Qt::ArrowCursor);
     }
 
     void resetAutoHide() {
-        if (m_tvMode) {
-            showPanels();
+        showPanels();
+        if (m_isFullscreen) {
             m_autoHideTimer->start();
         }
     }
 
+    void checkOnlineStatus() {
+        QNetworkRequest req(QUrl(PLAYLIST_URL));
+        req.setRawHeader("User-Agent", "LiveTVPlayer/2.0");
+        QNetworkReply* reply = m_nam->head(req);
+        connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+            if (reply->error() == QNetworkReply::NoError) {
+                if (m_statusIndicator->status() == StatusIndicator::Offline && m_currentStreamUrl.isEmpty()) {
+                    // We have network, but not playing
+                }
+            }
+            reply->deleteLater();
+        });
+    }
+
+    void toggleFullscreen() {
+        if (m_isFullscreen) {
+            exitFullscreen();
+        } else {
+            enterFullscreen();
+        }
+    }
+
+    void enterFullscreen() {
+        m_isFullscreen = true;
+        // Store splitter state
+        m_savedSplitterState = m_vertSplitter->saveState();
+
+        // Hide channel list in vertical splitter, maximize video
+        m_channelView->hide();
+        m_leftPanel->hide();
+        m_headerBar->hide();
+
+        showFullScreen();
+        m_fullscreenBtn->setText("⊡");
+        m_fullscreenBtn->setToolTip("Exit Fullscreen (F11)");
+        m_autoHideTimer->start();
+    }
+
+    void exitFullscreen() {
+        m_isFullscreen = false;
+        m_autoHideTimer->stop();
+
+        showNormal();
+        showPanels();
+        m_channelView->show();
+
+        if (!m_savedSplitterState.isEmpty()) {
+            m_vertSplitter->restoreState(m_savedSplitterState);
+        }
+
+        m_fullscreenBtn->setText("⊞");
+        m_fullscreenBtn->setToolTip("Fullscreen (F11)");
+        setCursor(Qt::ArrowCursor);
+    }
+
 private:
     void setupUi() {
-        QWidget* centralWidget = new QWidget(this);
-        setCentralWidget(centralWidget);
+        QWidget* central = new QWidget(this);
+        setCentralWidget(central);
+        QVBoxLayout* rootLayout = new QVBoxLayout(central);
+        rootLayout->setContentsMargins(0, 0, 0, 0);
+        rootLayout->setSpacing(0);
 
-        QVBoxLayout* mainLayout = new QVBoxLayout(centralWidget);
-        mainLayout->setContentsMargins(0, 0, 0, 0);
-        mainLayout->setSpacing(0);
+        // ── Header Bar ──
+        m_headerBar = new QWidget(central);
+        m_headerBar->setFixedHeight(52);
+        m_headerBar->setObjectName("headerBar");
+        QHBoxLayout* headerLayout = new QHBoxLayout(m_headerBar);
+        headerLayout->setContentsMargins(16, 0, 16, 0);
+        headerLayout->setSpacing(12);
 
-        m_topBar = new QWidget(centralWidget);
-        QHBoxLayout* topLayout = new QHBoxLayout(m_topBar);
-        topLayout->setContentsMargins(5, 5, 5, 5);
+        // App icon / title
+        QLabel* appTitle = new QLabel("📺  Live TV", m_headerBar);
+        appTitle->setObjectName("appTitle");
+        headerLayout->addWidget(appTitle);
 
-        m_urlEdit = new QLineEdit(m_topBar);
-        m_urlEdit->setPlaceholderText("Enter M3U playlist URL...");
-        m_urlEdit->setMinimumWidth(300);
-        topLayout->addWidget(m_urlEdit, 1);
+        headerLayout->addSpacing(12);
 
-        QPushButton* loadBtn = new QPushButton("Load", m_topBar);
-        connect(loadBtn, &QPushButton::clicked, this, &MainWindow::onLoadClicked);
-        topLayout->addWidget(loadBtn);
-
-        QPushButton* pasteBtn = new QPushButton("Paste", m_topBar);
-        connect(pasteBtn, &QPushButton::clicked, this, &MainWindow::onPasteClicked);
-        topLayout->addWidget(pasteBtn);
-
-        QPushButton* defaultBtn = new QPushButton("Default", m_topBar);
-        connect(defaultBtn, &QPushButton::clicked, this, &MainWindow::onDefaultClicked);
-        topLayout->addWidget(defaultBtn);
-
-        m_searchEdit = new QLineEdit(m_topBar);
-        m_searchEdit->setPlaceholderText("Search channels...");
-        m_searchEdit->setMaximumWidth(250);
+        // Search bar
+        m_searchEdit = new QLineEdit(m_headerBar);
+        m_searchEdit->setPlaceholderText("🔍  Search channels…");
+        m_searchEdit->setObjectName("searchEdit");
+        m_searchEdit->setMaximumWidth(320);
+        m_searchEdit->setMinimumWidth(180);
+        m_searchEdit->setClearButtonEnabled(true);
         connect(m_searchEdit, &QLineEdit::textChanged, this, &MainWindow::onSearchChanged);
-        topLayout->addWidget(m_searchEdit);
+        headerLayout->addWidget(m_searchEdit);
 
-        mainLayout->addWidget(m_topBar);
+        headerLayout->addStretch();
 
-        QSplitter* splitter = new QSplitter(Qt::Horizontal, centralWidget);
+        // Now playing label
+        m_nowPlayingLabel = new QLabel("  No channel selected", m_headerBar);
+        m_nowPlayingLabel->setObjectName("nowPlaying");
+        headerLayout->addWidget(m_nowPlayingLabel);
 
-        m_leftPanel = new QWidget(splitter);
+        headerLayout->addStretch();
+
+        // Channel count
+        m_channelCountLabel = new QLabel("0 channels", m_headerBar);
+        m_channelCountLabel->setObjectName("channelCount");
+        headerLayout->addWidget(m_channelCountLabel);
+
+        headerLayout->addSpacing(8);
+
+        // Status indicator
+        m_statusIndicator = new StatusIndicator(m_headerBar);
+        m_statusIndicator->setStatus(StatusIndicator::Offline);
+        headerLayout->addWidget(m_statusIndicator);
+
+        headerLayout->addSpacing(8);
+
+        // Volume button area
+        QPushButton* volDown = new QPushButton("🔉", m_headerBar);
+        volDown->setObjectName("iconBtn");
+        volDown->setFixedSize(32, 32);
+        volDown->setToolTip("Volume Down");
+        connect(volDown, &QPushButton::clicked, this, [this]() { changeVolume(-5); });
+        headerLayout->addWidget(volDown);
+
+        m_volumeLabel = new QLabel("100%", m_headerBar);
+        m_volumeLabel->setObjectName("volumeLabel");
+        m_volumeLabel->setFixedWidth(40);
+        m_volumeLabel->setAlignment(Qt::AlignCenter);
+        headerLayout->addWidget(m_volumeLabel);
+
+        QPushButton* volUp = new QPushButton("🔊", m_headerBar);
+        volUp->setObjectName("iconBtn");
+        volUp->setFixedSize(32, 32);
+        volUp->setToolTip("Volume Up");
+        connect(volUp, &QPushButton::clicked, this, [this]() { changeVolume(5); });
+        headerLayout->addWidget(volUp);
+
+        headerLayout->addSpacing(4);
+
+        // Fullscreen button
+        m_fullscreenBtn = new QPushButton("⊞", m_headerBar);
+        m_fullscreenBtn->setObjectName("iconBtn");
+        m_fullscreenBtn->setFixedSize(32, 32);
+        m_fullscreenBtn->setToolTip("Fullscreen (F11)");
+        connect(m_fullscreenBtn, &QPushButton::clicked, this, &MainWindow::toggleFullscreen);
+        headerLayout->addWidget(m_fullscreenBtn);
+
+        rootLayout->addWidget(m_headerBar);
+
+        // ── Separator ──
+        QFrame* sep = new QFrame(central);
+        sep->setFrameShape(QFrame::HLine);
+        sep->setObjectName("headerSep");
+        sep->setFixedHeight(1);
+        rootLayout->addWidget(sep);
+
+        // ── Main Content ──
+        QSplitter* hSplitter = new QSplitter(Qt::Horizontal, central);
+        hSplitter->setObjectName("mainSplitter");
+
+        // Left panel - categories
+        m_leftPanel = new QWidget(hSplitter);
+        m_leftPanel->setObjectName("leftPanel");
+        m_leftPanel->setMinimumWidth(170);
+        m_leftPanel->setMaximumWidth(240);
         QVBoxLayout* leftLayout = new QVBoxLayout(m_leftPanel);
-        leftLayout->setContentsMargins(2, 2, 2, 2);
+        leftLayout->setContentsMargins(8, 12, 4, 8);
+        leftLayout->setSpacing(6);
 
         QLabel* catLabel = new QLabel("Categories", m_leftPanel);
-        catLabel->setStyleSheet("font-weight: bold; font-size: 14px; padding: 4px;");
+        catLabel->setObjectName("sectionTitle");
         leftLayout->addWidget(catLabel);
 
         m_categoryList = new QListWidget(m_leftPanel);
-        m_categoryList->setMaximumWidth(220);
-        m_categoryList->setMinimumWidth(150);
+        m_categoryList->setObjectName("categoryList");
         connect(m_categoryList, &QListWidget::currentRowChanged, this, &MainWindow::onCategoryChanged);
         leftLayout->addWidget(m_categoryList);
 
-        splitter->addWidget(m_leftPanel);
+        // Refresh button
+        QPushButton* refreshBtn = new QPushButton("↻  Refresh Playlist", m_leftPanel);
+        refreshBtn->setObjectName("refreshBtn");
+        connect(refreshBtn, &QPushButton::clicked, this, [this]() {
+            fetchPlaylist(PLAYLIST_URL);
+        });
+        leftLayout->addWidget(refreshBtn);
 
-        QWidget* rightPanel = new QWidget(splitter);
+        hSplitter->addWidget(m_leftPanel);
+
+        // Right side - video + channels
+        QWidget* rightPanel = new QWidget(hSplitter);
         QVBoxLayout* rightLayout = new QVBoxLayout(rightPanel);
         rightLayout->setContentsMargins(0, 0, 0, 0);
         rightLayout->setSpacing(0);
 
+        m_vertSplitter = new QSplitter(Qt::Vertical, rightPanel);
+
+        m_videoWidget = new VideoWidget(m_vertSplitter);
+        m_videoWidget->installEventFilter(this);
+        connect(m_videoWidget, &VideoWidget::doubleClicked, this, &MainWindow::toggleFullscreen);
+
+        m_vertSplitter->addWidget(m_videoWidget);
+
+        // Channel grid
         m_channelModel = new ChannelModel(this);
         m_proxyModel = new CategoryFilterProxy(this);
         m_proxyModel->setSourceModel(m_channelModel);
 
-        m_channelView = new QListView(rightPanel);
+        m_channelView = new QListView(m_vertSplitter);
         m_channelView->setModel(m_proxyModel);
         m_channelView->setViewMode(QListView::IconMode);
         m_channelView->setResizeMode(QListView::Adjust);
         m_channelView->setMovement(QListView::Static);
-        m_channelView->setSpacing(4);
+        m_channelView->setSpacing(6);
         m_channelView->setUniformItemSizes(true);
         m_channelView->setWrapping(true);
         m_channelView->setSelectionMode(QAbstractItemView::SingleSelection);
         m_channelView->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
         m_channelView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        m_channelView->setObjectName("channelGrid");
 
         m_delegate = new ChannelDelegate(this);
         m_delegate->setLogoCache(&m_logoPixmaps);
@@ -624,57 +873,197 @@ private:
         connect(m_channelView, &QListView::clicked, this, &MainWindow::onChannelClicked);
         connect(m_channelView, &QListView::activated, this, &MainWindow::onChannelClicked);
 
-        QSplitter* vertSplitter = new QSplitter(Qt::Vertical, rightPanel);
+        m_vertSplitter->addWidget(m_channelView);
+        m_vertSplitter->setStretchFactor(0, 3);
+        m_vertSplitter->setStretchFactor(1, 2);
 
-        m_videoWidget = new VideoWidget(vertSplitter);
-        m_videoWidget->installEventFilter(this);
+        rightLayout->addWidget(m_vertSplitter);
 
-        vertSplitter->addWidget(m_videoWidget);
-        vertSplitter->addWidget(m_channelView);
-        vertSplitter->setStretchFactor(0, 3);
-        vertSplitter->setStretchFactor(1, 2);
+        hSplitter->addWidget(rightPanel);
+        hSplitter->setStretchFactor(0, 0);
+        hSplitter->setStretchFactor(1, 1);
+        hSplitter->setSizes({200, 1080});
 
-        rightLayout->addWidget(vertSplitter);
+        rootLayout->addWidget(hSplitter, 1);
 
-        splitter->addWidget(rightPanel);
-        splitter->setStretchFactor(0, 0);
-        splitter->setStretchFactor(1, 1);
-        splitter->setSizes(QList<int>() << 200 << 1080);
-
-        mainLayout->addWidget(splitter, 1);
-
+        // OSD
         m_osd = new OsdWidget(m_videoWidget);
         m_osd->setGeometry(m_videoWidget->rect());
 
-        statusBar()->showMessage("Ready. Enter a playlist URL and click Load.");
-        statusBar()->setStyleSheet("color: #ccc;");
+        // Status bar
+        statusBar()->showMessage("Loading playlist…");
     }
 
-    void applyDarkTheme() {
-        QString style =
-            "QMainWindow, QWidget { background-color: #1e1e2e; color: #e0e0e0; }"
-            "QLineEdit { background-color: #2a2a3e; color: #e0e0e0; border: 1px solid #444; border-radius: 4px; padding: 4px 8px; }"
-            "QPushButton { background-color: #3a3a5e; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; padding: 5px 12px; }"
-            "QPushButton:hover { background-color: #4a4a7e; }"
-            "QPushButton:pressed { background-color: #2a2a4e; }"
-            "QListWidget { background-color: #252538; color: #e0e0e0; border: 1px solid #333; }"
-            "QListWidget::item { padding: 6px; }"
-            "QListWidget::item:selected { background-color: #0078d7; }"
-            "QListWidget::item:hover { background-color: #353550; }"
-            "QListView { background-color: #1a1a2e; border: 1px solid #333; }"
-            "QSplitter::handle { background-color: #333; width: 3px; }"
-            "QStatusBar { background-color: #151525; color: #aaa; }"
-            "QLabel { color: #e0e0e0; }"
-            "QScrollBar:vertical { background: #1a1a2e; width: 10px; }"
-            "QScrollBar::handle:vertical { background: #444; border-radius: 5px; min-height: 20px; }"
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }";
+    void applyModernTheme() {
+        QString style = R"(
+            * {
+                font-family: 'Segoe UI', 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif;
+            }
+            QMainWindow, QWidget {
+                background-color: #0f0f1a;
+                color: #e2e8f0;
+            }
+
+            /* Header */
+            #headerBar {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #1a1a2e, stop:1 #16162a);
+                border-bottom: 1px solid rgba(255,255,255,0.06);
+            }
+            #appTitle {
+                font-size: 16px;
+                font-weight: 700;
+                color: #f1f5f9;
+                letter-spacing: 0.5px;
+            }
+            #searchEdit {
+                background-color: #1e1e35;
+                color: #e2e8f0;
+                border: 1px solid rgba(255,255,255,0.1);
+                border-radius: 8px;
+                padding: 6px 12px;
+                font-size: 13px;
+                selection-background-color: #6366f1;
+            }
+            #searchEdit:focus {
+                border: 1px solid #6366f1;
+                background-color: #222240;
+            }
+            #nowPlaying {
+                color: #a5b4fc;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            #channelCount {
+                color: #64748b;
+                font-size: 11px;
+            }
+            #volumeLabel {
+                color: #94a3b8;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            #iconBtn {
+                background: rgba(255,255,255,0.05);
+                border: 1px solid rgba(255,255,255,0.08);
+                border-radius: 6px;
+                color: #e2e8f0;
+                font-size: 14px;
+            }
+            #iconBtn:hover {
+                background: rgba(99,102,241,0.3);
+                border-color: rgba(99,102,241,0.5);
+            }
+            #iconBtn:pressed {
+                background: rgba(99,102,241,0.5);
+            }
+            #headerSep {
+                background-color: rgba(255,255,255,0.04);
+                border: none;
+            }
+
+            /* Left Panel */
+            #leftPanel {
+                background-color: #12121f;
+                border-right: 1px solid rgba(255,255,255,0.04);
+            }
+            #sectionTitle {
+                font-weight: 700;
+                font-size: 13px;
+                color: #94a3b8;
+                text-transform: uppercase;
+                letter-spacing: 1px;
+                padding: 4px 8px;
+            }
+            #categoryList {
+                background-color: transparent;
+                border: none;
+                outline: none;
+                font-size: 13px;
+            }
+            #categoryList::item {
+                padding: 8px 12px;
+                border-radius: 8px;
+                margin: 1px 4px;
+                color: #cbd5e1;
+            }
+            #categoryList::item:selected {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(99,102,241,0.35), stop:1 rgba(99,102,241,0.15));
+                color: #e0e7ff;
+                border-left: 3px solid #6366f1;
+            }
+            #categoryList::item:hover:!selected {
+                background-color: rgba(255,255,255,0.04);
+            }
+            #refreshBtn {
+                background: rgba(99,102,241,0.15);
+                border: 1px solid rgba(99,102,241,0.25);
+                border-radius: 8px;
+                color: #a5b4fc;
+                padding: 8px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            #refreshBtn:hover {
+                background: rgba(99,102,241,0.3);
+                color: #e0e7ff;
+            }
+
+            /* Channel Grid */
+            #channelGrid {
+                background-color: #0f0f1a;
+                border: none;
+                border-top: 1px solid rgba(255,255,255,0.04);
+            }
+
+            /* Splitter */
+            QSplitter::handle {
+                background-color: rgba(255,255,255,0.04);
+            }
+            QSplitter::handle:horizontal { width: 1px; }
+            QSplitter::handle:vertical { height: 4px; }
+            QSplitter::handle:hover {
+                background-color: rgba(99,102,241,0.4);
+            }
+
+            /* Status Bar */
+            QStatusBar {
+                background-color: #0a0a16;
+                color: #64748b;
+                font-size: 11px;
+                border-top: 1px solid rgba(255,255,255,0.04);
+                padding: 2px 12px;
+            }
+
+            /* Scrollbars */
+            QScrollBar:vertical {
+                background: transparent;
+                width: 8px;
+                margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(148,163,184,0.2);
+                border-radius: 4px;
+                min-height: 30px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(148,163,184,0.35);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+        )";
         qApp->setStyleSheet(style);
     }
 
     void setupMpv() {
         m_mpv = mpv_create();
         if (!m_mpv) {
-            QMessageBox::critical(this, "Error", "Failed to create mpv instance. Playback will be disabled.");
+            QMessageBox::critical(this, "Error", "Failed to create mpv instance.");
             m_mpvOk = false;
             return;
         }
@@ -698,8 +1087,7 @@ private:
 
         int err = mpv_initialize(m_mpv);
         if (err < 0) {
-            QMessageBox::critical(this, "Error",
-                QString("Failed to initialize mpv: %1").arg(mpv_error_string(err)));
+            QMessageBox::critical(this, "Error", QString("mpv init failed: %1").arg(mpv_error_string(err)));
             mpv_terminate_destroy(m_mpv);
             m_mpv = nullptr;
             m_mpvOk = false;
@@ -713,8 +1101,7 @@ private:
         m_mpvOk = true;
 
         if (m_volume >= 0) {
-            QString volStr = QString::number(m_volume);
-            mpv_set_property_string(m_mpv, "volume", volStr.toUtf8().constData());
+            mpv_set_property_string(m_mpv, "volume", QString::number(m_volume).toUtf8().constData());
         }
         if (m_muted) {
             mpv_set_property_string(m_mpv, "mute", "yes");
@@ -723,38 +1110,30 @@ private:
 
     void loadSettings() {
         QSettings s("LiveTVPlayer", "LiveTVPlayer");
-        QString lastUrl = s.value("lastUrl", DEFAULT_PLAYLIST_URL).toString();
-        m_urlEdit->setText(lastUrl);
         m_currentCategory = s.value("lastCategory", "All").toString();
         m_volume = s.value("volume", 100).toInt();
         m_muted = s.value("muted", false).toBool();
-        m_tvMode = s.value("tvMode", false).toBool();
         m_lastStreamUrl = s.value("lastStream", "").toString();
+        updateVolumeLabel();
     }
 
     void saveSettings() {
         QSettings s("LiveTVPlayer", "LiveTVPlayer");
-        s.setValue("lastUrl", m_urlEdit->text().trimmed());
         s.setValue("lastCategory", m_currentCategory);
         s.setValue("volume", m_volume);
         s.setValue("muted", m_muted);
-        s.setValue("tvMode", m_tvMode);
-        if (!m_currentStreamUrl.isEmpty()) {
-            s.setValue("lastStream", m_currentStreamUrl);
-        }
+        if (!m_currentStreamUrl.isEmpty()) s.setValue("lastStream", m_currentStreamUrl);
     }
 
     void fetchPlaylist(const QString& urlStr) {
         QUrl url(urlStr);
-        if (!url.isValid() || (url.scheme() != "http" && url.scheme() != "https")) {
-            QMessageBox::warning(this, "Invalid URL", "URL must use http or https scheme.");
-            return;
-        }
+        if (!url.isValid()) return;
 
-        statusBar()->showMessage("Loading playlist...");
+        m_statusIndicator->setStatus(StatusIndicator::Connecting);
+        statusBar()->showMessage("Loading playlist…");
 
         QNetworkRequest req(url);
-        req.setRawHeader("User-Agent", "LiveTVPlayer/1.0");
+        req.setRawHeader("User-Agent", "LiveTVPlayer/2.0");
         req.setAttribute(QNetworkRequest::FollowRedirectsAttribute, true);
 
         QNetworkReply* reply = m_nam->get(req);
@@ -762,9 +1141,7 @@ private:
         QTimer* timeout = new QTimer(this);
         timeout->setSingleShot(true);
         connect(timeout, &QTimer::timeout, this, [reply, timeout]() {
-            if (reply && reply->isRunning()) {
-                reply->abort();
-            }
+            if (reply && reply->isRunning()) reply->abort();
             timeout->deleteLater();
         });
         timeout->start(PLAYLIST_TIMEOUT_MS);
@@ -773,9 +1150,7 @@ private:
 
         connect(reply, &QNetworkReply::readyRead, this, [this, reply]() {
             m_downloadedBytes += reply->bytesAvailable();
-            if (m_downloadedBytes > MAX_DOWNLOAD_SIZE) {
-                reply->abort();
-            }
+            if (m_downloadedBytes > MAX_DOWNLOAD_SIZE) reply->abort();
         });
 
         connect(reply, &QNetworkReply::finished, this, [this, reply, timeout]() {
@@ -783,9 +1158,8 @@ private:
             timeout->deleteLater();
 
             if (reply->error() != QNetworkReply::NoError) {
-                statusBar()->showMessage("Failed to load playlist.");
-                QMessageBox::warning(this, "Network Error",
-                    QString("Failed to download playlist:\n%1").arg(reply->errorString()));
+                m_statusIndicator->setStatus(StatusIndicator::Offline);
+                statusBar()->showMessage("Failed to load playlist – check your connection");
                 reply->deleteLater();
                 return;
             }
@@ -794,7 +1168,7 @@ private:
             reply->deleteLater();
 
             if (data.size() > MAX_DOWNLOAD_SIZE) {
-                QMessageBox::warning(this, "Error", "Playlist too large.");
+                statusBar()->showMessage("Playlist too large.");
                 return;
             }
 
@@ -809,18 +1183,19 @@ private:
 
         if (lines.isEmpty()) {
             statusBar()->showMessage("Empty playlist.");
+            m_statusIndicator->setStatus(StatusIndicator::Offline);
             return;
         }
 
-        QRegularExpression reExtInf("#EXTINF\\s*:\\s*(-?\\d+)\\s*(.*),\\s*(.*)");
-        QRegularExpression reLogo("tvg-logo\\s*=\\s*\"([^\"]*)\"");
-        QRegularExpression reGroup("group-title\\s*=\\s*\"([^\"]*)\"");
+        QRegularExpression reExtInf(R"(#EXTINF\s*:\s*(-?\d+)\s*(.*),\s*(.*))");
+        QRegularExpression reLogo(R"(tvg-logo\s*=\s*"([^"]*)")");
+        QRegularExpression reGroup(R"(group-title\s*=\s*"([^"]*)")");
 
         Channel pending;
         bool hasPending = false;
 
-        for (int i = 0; i < lines.size(); ++i) {
-            QString line = lines[i].trimmed();
+        for (const QString& rawLine : lines) {
+            QString line = rawLine.trimmed();
             if (line.isEmpty()) continue;
 
             if (line.startsWith("#EXTINF")) {
@@ -833,14 +1208,10 @@ private:
                         pending.name = pending.name.left(MAX_NAME_LEN);
 
                     QRegularExpressionMatch logoMatch = reLogo.match(attrs);
-                    if (logoMatch.hasMatch()) {
-                        pending.logoUrl = logoMatch.captured(1).trimmed();
-                    }
+                    if (logoMatch.hasMatch()) pending.logoUrl = logoMatch.captured(1).trimmed();
 
                     QRegularExpressionMatch groupMatch = reGroup.match(attrs);
-                    if (groupMatch.hasMatch()) {
-                        pending.category = groupMatch.captured(1).trimmed();
-                    }
+                    if (groupMatch.hasMatch()) pending.category = groupMatch.captured(1).trimmed();
                 } else {
                     int commaIdx = line.lastIndexOf(',');
                     if (commaIdx >= 0) {
@@ -853,13 +1224,16 @@ private:
                 if (pending.category.isEmpty()) pending.category = "Others";
                 if (pending.name.isEmpty()) pending.name = "Unknown";
                 hasPending = true;
-
             } else if (!line.startsWith("#")) {
                 if (hasPending) {
                     QUrl streamUrl(line);
-                    if (streamUrl.isValid() && (streamUrl.scheme() == "http" || streamUrl.scheme() == "https" || streamUrl.scheme() == "rtsp" || streamUrl.scheme() == "rtmp" || streamUrl.scheme() == "mms" || streamUrl.scheme() == "mmsh")) {
-                        pending.streamUrl = line;
-                        channels.append(pending);
+                    if (streamUrl.isValid()) {
+                        QString scheme = streamUrl.scheme();
+                        if (scheme == "http" || scheme == "https" || scheme == "rtsp" ||
+                            scheme == "rtmp" || scheme == "mms" || scheme == "mmsh") {
+                            pending.streamUrl = line;
+                            channels.append(pending);
+                        }
                     }
                     hasPending = false;
                 }
@@ -867,17 +1241,16 @@ private:
         }
 
         if (channels.isEmpty()) {
-            statusBar()->showMessage("No valid channels found in playlist.");
-            QMessageBox::information(this, "Info", "No valid channels found in the playlist.");
+            statusBar()->showMessage("No valid channels found.");
+            m_statusIndicator->setStatus(StatusIndicator::Offline);
             return;
         }
 
         m_channelModel->setChannels(channels);
 
+        // Build categories
         QSet<QString> catSet;
-        for (const auto& ch : channels) {
-            catSet.insert(ch.category);
-        }
+        for (const auto& ch : channels) catSet.insert(ch.category);
         QStringList cats = catSet.values();
         std::sort(cats.begin(), cats.end());
         cats.prepend("All");
@@ -885,7 +1258,8 @@ private:
         m_categoryList->blockSignals(true);
         m_categoryList->clear();
         for (const auto& c : cats) {
-            m_categoryList->addItem(c);
+            QListWidgetItem* item = new QListWidgetItem(c);
+            m_categoryList->addItem(item);
         }
         m_categoryList->blockSignals(false);
 
@@ -901,9 +1275,23 @@ private:
         m_categoryList->setCurrentRow(catIdx);
         onCategoryChanged(catIdx);
 
-        statusBar()->showMessage(QString("Loaded %1 channels in %2 categories.").arg(channels.size()).arg(cats.size() - 1));
-
+        statusBar()->showMessage(QString("Loaded %1 channels · %2 categories").arg(channels.size()).arg(cats.size() - 1));
+        if (m_currentStreamUrl.isEmpty()) {
+            m_statusIndicator->setStatus(StatusIndicator::Online);
+        }
+        updateChannelCount();
         scheduleLogoDownloads();
+    }
+
+    void updateChannelCount() {
+        int count = m_proxyModel ? m_proxyModel->rowCount() : 0;
+        m_channelCountLabel->setText(QString("%1 channel%2").arg(count).arg(count != 1 ? "s" : ""));
+    }
+
+    void updateVolumeLabel() {
+        if (m_volumeLabel) {
+            m_volumeLabel->setText(QString("%1%").arg(m_volume));
+        }
     }
 
     void scheduleLogoDownloads() {
@@ -921,14 +1309,12 @@ private:
                 }
             }
         }
-
         downloadNextLogos();
     }
 
     void downloadNextLogos() {
         while (m_activeLogoDownloads < MAX_CONCURRENT_DOWNLOADS && !m_logoPending.isEmpty()) {
-            QString url = m_logoPending.takeFirst();
-            downloadLogo(url);
+            downloadLogo(m_logoPending.takeFirst());
         }
     }
 
@@ -937,7 +1323,7 @@ private:
         if (!url.isValid()) return;
 
         QNetworkRequest req(url);
-        req.setRawHeader("User-Agent", "LiveTVPlayer/1.0");
+        req.setRawHeader("User-Agent", "LiveTVPlayer/2.0");
         req.setAttribute(QNetworkRequest::FollowRedirectsAttribute, true);
 
         QNetworkReply* reply = m_logoNam->get(req);
@@ -946,9 +1332,7 @@ private:
         QTimer* timeout = new QTimer(this);
         timeout->setSingleShot(true);
         connect(timeout, &QTimer::timeout, this, [reply, timeout]() {
-            if (reply && reply->isRunning()) {
-                reply->abort();
-            }
+            if (reply && reply->isRunning()) reply->abort();
             timeout->deleteLater();
         });
         timeout->start(IMAGE_TIMEOUT_MS);
@@ -963,7 +1347,7 @@ private:
                 if (imgData.size() < 2 * 1024 * 1024 && !imgData.isEmpty()) {
                     QPixmap pm;
                     if (pm.loadFromData(imgData)) {
-                        m_logoPixmaps.insert(urlStr, pm.scaled(60, 45, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                        m_logoPixmaps.insert(urlStr, pm.scaled(52, 42, Qt::KeepAspectRatio, Qt::SmoothTransformation));
                     }
                 }
             }
@@ -978,49 +1362,39 @@ private:
     }
 
     void playStream(const QString& url) {
-        if (!m_mpvOk || !m_mpv) {
-            statusBar()->showMessage("Playback unavailable (mpv not initialized).");
+        if (!m_mpvOk || !m_mpv || url.isEmpty()) {
+            statusBar()->showMessage("Playback unavailable.");
             return;
         }
-
-        if (url.isEmpty()) return;
 
         QByteArray urlBytes = url.toUtf8();
         const char* cmd[] = {"loadfile", urlBytes.constData(), "replace", nullptr};
         int err = mpv_command(m_mpv, cmd);
         if (err < 0) {
             statusBar()->showMessage(QString("mpv error: %1").arg(mpv_error_string(err)));
-        }
-    }
-
-    void toggleFullscreen() {
-        if (isFullScreen()) {
-            showNormal();
-        } else {
-            showFullScreen();
+            m_statusIndicator->setStatus(StatusIndicator::Offline);
         }
     }
 
     void zapChannel(int direction) {
         if (!m_proxyModel || m_proxyModel->rowCount() == 0) return;
-
         int current = m_channelView->currentIndex().row();
         if (current < 0) current = 0;
         int next = current + direction;
         if (next < 0) next = m_proxyModel->rowCount() - 1;
         if (next >= m_proxyModel->rowCount()) next = 0;
-
         QModelIndex idx = m_proxyModel->index(next, 0);
         m_channelView->setCurrentIndex(idx);
+        m_channelView->scrollTo(idx);
         onChannelClicked(idx);
     }
 
     void changeVolume(int delta) {
         m_volume = qBound(0, m_volume + delta, 150);
         if (m_mpv && m_mpvOk) {
-            QString volStr = QString::number(m_volume);
-            mpv_set_property_string(m_mpv, "volume", volStr.toUtf8().constData());
+            mpv_set_property_string(m_mpv, "volume", QString::number(m_volume).toUtf8().constData());
         }
+        updateVolumeLabel();
         statusBar()->showMessage(QString("Volume: %1%").arg(m_volume), 2000);
     }
 
@@ -1041,6 +1415,7 @@ private:
         statusBar()->showMessage(pause ? "Paused" : "Playing", 2000);
     }
 
+    // ── Members ──
     mpv_handle* m_mpv = nullptr;
     bool m_mpvOk = false;
 
@@ -1048,14 +1423,19 @@ private:
     QNetworkAccessManager* m_logoNam = nullptr;
     int m_downloadedBytes = 0;
 
-    QWidget* m_topBar = nullptr;
+    QWidget* m_headerBar = nullptr;
     QWidget* m_leftPanel = nullptr;
-    QLineEdit* m_urlEdit = nullptr;
     QLineEdit* m_searchEdit = nullptr;
+    QLabel* m_nowPlayingLabel = nullptr;
+    QLabel* m_channelCountLabel = nullptr;
+    QLabel* m_volumeLabel = nullptr;
+    QPushButton* m_fullscreenBtn = nullptr;
+    StatusIndicator* m_statusIndicator = nullptr;
     QListWidget* m_categoryList = nullptr;
     QListView* m_channelView = nullptr;
     VideoWidget* m_videoWidget = nullptr;
     OsdWidget* m_osd = nullptr;
+    QSplitter* m_vertSplitter = nullptr;
 
     ChannelModel* m_channelModel = nullptr;
     CategoryFilterProxy* m_proxyModel = nullptr;
@@ -1068,6 +1448,7 @@ private:
     QTimer* m_debounceTimer = nullptr;
     QTimer* m_autoHideTimer = nullptr;
     QTimer* m_searchDebounce = nullptr;
+    QTimer* m_statusCheckTimer = nullptr;
 
     QString m_pendingStreamUrl;
     QString m_pendingChannelName;
@@ -1082,7 +1463,8 @@ private:
 
     int m_volume = 100;
     bool m_muted = false;
-    bool m_tvMode = false;
+    bool m_isFullscreen = false;
+    QByteArray m_savedSplitterState;
 };
 
 #include "main.moc"
