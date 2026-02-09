@@ -43,9 +43,6 @@
 #include <QScreen>
 #include <QScrollBar>
 #include <QPainterPath>
-#include <QGraphicsDropShadowEffect>
-#include <QToolButton>
-#include <QStackedWidget>
 #include <QtGlobal>
 
 #ifdef Q_OS_WIN
@@ -83,8 +80,6 @@ enum ChannelRoles {
     IndexRole
 };
 
-// ─── Channel Model ───────────────────────────────────────────────
-
 class ChannelModel : public QAbstractListModel {
     Q_OBJECT
 public:
@@ -117,8 +112,13 @@ public:
     }
 
     QHash<int, QByteArray> roleNames() const override {
-        return {{NameRole, "channelName"}, {CategoryRole, "category"},
-                {LogoUrlRole, "logoUrl"}, {StreamUrlRole, "streamUrl"}, {IndexRole, "channelIndex"}};
+        QHash<int, QByteArray> roles;
+        roles[NameRole] = "channelName";
+        roles[CategoryRole] = "category";
+        roles[LogoUrlRole] = "logoUrl";
+        roles[StreamUrlRole] = "streamUrl";
+        roles[IndexRole] = "channelIndex";
+        return roles;
     }
 
     const QVector<Channel>& channels() const { return m_channels; }
@@ -126,8 +126,6 @@ public:
 private:
     QVector<Channel> m_channels;
 };
-
-// ─── Category Filter Proxy ───────────────────────────────────────
 
 class CategoryFilterProxy : public QSortFilterProxyModel {
     Q_OBJECT
@@ -156,8 +154,6 @@ private:
     QString m_search;
 };
 
-// ─── Channel Delegate ────────────────────────────────────────────
-
 class ChannelDelegate : public QStyledItemDelegate {
     Q_OBJECT
 public:
@@ -176,7 +172,6 @@ public:
         QPainterPath path;
         path.addRoundedRect(QRectF(r), 10, 10);
 
-        // Card background
         QColor cardBg(38, 40, 58);
         if (option.state & QStyle::State_Selected) {
             cardBg = QColor(59, 130, 246);
@@ -186,15 +181,13 @@ public:
 
         painter->fillPath(path, cardBg);
 
-        // Subtle border
         painter->setPen(QPen(QColor(255, 255, 255, 15), 1));
         painter->drawPath(path);
 
-        // Logo area
         QRect iconRect(r.left() + 10, r.top() + 8, 52, 42);
         QString logoUrl = index.data(LogoUrlRole).toString();
         QString name = index.data(NameRole).toString();
-        if (name.length() > MAX_NAME_LEN) name = name.left(MAX_NAME_LEN) + "…";
+        if (name.length() > MAX_NAME_LEN) name = name.left(MAX_NAME_LEN) + "...";
         QString category = index.data(CategoryRole).toString();
 
         bool drawn = false;
@@ -229,18 +222,15 @@ public:
             painter->drawText(iconRect, Qt::AlignCenter, name.isEmpty() ? "?" : name.left(1).toUpper());
         }
 
-        // Channel name
         painter->setPen(QColor(240, 240, 245));
         QFont nameFont = painter->font();
         nameFont.setPixelSize(11);
         nameFont.setBold(true);
-        nameFont.setFamily("Segoe UI, SF Pro Display, Helvetica Neue, Arial");
         painter->setFont(nameFont);
         QRect nameRect(r.left() + 8, r.top() + 56, r.width() - 16, 18);
         QString elidedName = painter->fontMetrics().elidedText(name, Qt::ElideRight, nameRect.width());
         painter->drawText(nameRect, Qt::AlignLeft | Qt::AlignVCenter, elidedName);
 
-        // Category tag
         if (!category.isEmpty()) {
             painter->setPen(QColor(148, 163, 184));
             QFont catFont = nameFont;
@@ -259,8 +249,6 @@ private:
     QHash<QString, QPixmap>* m_logoCache = nullptr;
 };
 
-// ─── OSD Widget ──────────────────────────────────────────────────
-
 class OsdWidget : public QWidget {
     Q_OBJECT
 public:
@@ -271,12 +259,7 @@ public:
         hide();
         m_hideTimer = new QTimer(this);
         m_hideTimer->setSingleShot(true);
-        connect(m_hideTimer, &QTimer::timeout, this, [this]() {
-            // Fade out
-            m_opacity = 0.0;
-            hide();
-        });
-        m_opacity = 1.0;
+        connect(m_hideTimer, &QTimer::timeout, this, &QWidget::hide);
     }
 
     void showOsd(const QString& channelName, const QString& category, int index, int total) {
@@ -284,7 +267,6 @@ public:
         m_category = category;
         m_index = index;
         m_total = total;
-        m_opacity = 1.0;
         show();
         raise();
         update();
@@ -295,26 +277,22 @@ protected:
     void paintEvent(QPaintEvent*) override {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
-        p.setOpacity(m_opacity);
 
         int boxW = qMin(width() - 60, 520);
         int boxH = 90;
         int x = (width() - boxW) / 2;
         int y = height() - boxH - 50;
 
-        // Glassmorphism background
         QPainterPath bgPath;
         bgPath.addRoundedRect(x, y, boxW, boxH, 16, 16);
         p.fillPath(bgPath, QColor(15, 15, 30, 210));
         p.setPen(QPen(QColor(255, 255, 255, 30), 1));
         p.drawPath(bgPath);
 
-        // Accent line
         p.setPen(Qt::NoPen);
         p.setBrush(QColor(99, 102, 241));
         p.drawRoundedRect(x + 16, y + 14, 4, boxH - 28, 2, 2);
 
-        // Channel name
         p.setPen(Qt::white);
         QFont f = font();
         f.setPixelSize(20);
@@ -323,13 +301,12 @@ protected:
         QString elidedName = p.fontMetrics().elidedText(m_channelName, Qt::ElideRight, boxW - 50);
         p.drawText(x + 30, y + 16, boxW - 50, 30, Qt::AlignLeft | Qt::AlignVCenter, elidedName);
 
-        // Info line
         f.setPixelSize(13);
         f.setBold(false);
         p.setFont(f);
         p.setPen(QColor(165, 180, 210));
         QString info = m_category;
-        if (m_total > 0) info += QString("  ·  %1 of %2").arg(m_index + 1).arg(m_total);
+        if (m_total > 0) info += QString("  |  %1 of %2").arg(m_index + 1).arg(m_total);
         p.drawText(x + 30, y + 50, boxW - 50, 24, Qt::AlignLeft | Qt::AlignVCenter, info);
     }
 
@@ -339,10 +316,7 @@ private:
     QString m_category;
     int m_index = 0;
     int m_total = 0;
-    qreal m_opacity = 1.0;
 };
-
-// ─── Video Widget ────────────────────────────────────────────────
 
 class VideoWidget : public QWidget {
     Q_OBJECT
@@ -366,17 +340,15 @@ protected:
     }
 };
 
-// ─── Status Indicator Widget ─────────────────────────────────────
-
 class StatusIndicator : public QWidget {
     Q_OBJECT
-    Q_PROPERTY(QColor dotColor READ dotColor WRITE setDotColor)
 public:
     enum Status { Offline, Connecting, Online };
 
-    explicit StatusIndicator(QWidget* parent = nullptr) : QWidget(parent), m_status(Offline) {
+    explicit StatusIndicator(QWidget* parent = nullptr)
+        : QWidget(parent), m_status(Offline), m_dotColor(239, 68, 68), m_pulsePhase(false) {
         setFixedSize(140, 32);
-        m_dotColor = QColor(239, 68, 68);
+        m_statusText = "Offline";
         m_pulseTimer = new QTimer(this);
         m_pulseTimer->setInterval(1200);
         connect(m_pulseTimer, &QTimer::timeout, this, [this]() {
@@ -395,7 +367,7 @@ public:
                 break;
             case Connecting:
                 m_dotColor = QColor(251, 191, 36);
-                m_statusText = "Connecting…";
+                m_statusText = "Connecting...";
                 m_pulseTimer->start();
                 break;
             case Online:
@@ -408,23 +380,20 @@ public:
     }
 
     Status status() const { return m_status; }
-    QColor dotColor() const { return m_dotColor; }
-    void setDotColor(const QColor& c) { m_dotColor = c; update(); }
 
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
 
-        // Background pill
         QPainterPath bg;
-        bg.addRoundedRect(rect().adjusted(1, 1, -1, -1), 14, 14);
+        bg.addRoundedRect(QRectF(rect().adjusted(1, 1, -1, -1)), 14, 14);
         p.fillPath(bg, QColor(30, 32, 48, 200));
         p.setPen(QPen(QColor(255, 255, 255, 20), 1));
         p.drawPath(bg);
 
-        // Pulse ring for connecting
-        int dotX = 16, dotY = height() / 2;
+        int dotX = 16;
+        int dotY = height() / 2;
         if (m_status == Connecting && m_pulsePhase) {
             p.setPen(Qt::NoPen);
             QColor pulse = m_dotColor;
@@ -433,12 +402,10 @@ protected:
             p.drawEllipse(QPoint(dotX, dotY), 8, 8);
         }
 
-        // Dot
         p.setPen(Qt::NoPen);
         p.setBrush(m_dotColor);
         p.drawEllipse(QPoint(dotX, dotY), 5, 5);
 
-        // Text
         p.setPen(QColor(220, 225, 235));
         QFont f = font();
         f.setPixelSize(11);
@@ -450,12 +417,10 @@ protected:
 private:
     Status m_status;
     QColor m_dotColor;
-    QString m_statusText = "Offline";
+    QString m_statusText;
     QTimer* m_pulseTimer;
-    bool m_pulsePhase = false;
+    bool m_pulsePhase;
 };
-
-// ─── Main Window ─────────────────────────────────────────────────
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -492,9 +457,8 @@ public:
         loadSettings();
         applyModernTheme();
 
-        // Auto-fetch playlist on startup
         QTimer::singleShot(300, this, [this]() {
-            fetchPlaylist(PLAYLIST_URL);
+            fetchPlaylist(QString::fromLatin1(PLAYLIST_URL));
         });
 
         m_statusCheckTimer->start();
@@ -585,7 +549,7 @@ private slots:
         playStream(m_pendingStreamUrl);
         m_currentChannelName = m_pendingChannelName;
         m_currentStreamUrl = m_pendingStreamUrl;
-        m_nowPlayingLabel->setText("  ▶ " + m_currentChannelName);
+        m_nowPlayingLabel->setText("  > " + m_currentChannelName);
         if (m_osd) m_osd->showOsd(m_pendingChannelName, m_pendingCategory, m_pendingIndex, m_pendingTotal);
     }
 
@@ -604,7 +568,7 @@ private slots:
                 case MPV_EVENT_SHUTDOWN:
                     break;
                 case MPV_EVENT_END_FILE: {
-                    auto* ef = static_cast<mpv_event_end_file*>(event->data);
+                    mpv_event_end_file* ef = static_cast<mpv_event_end_file*>(event->data);
                     if (ef && ef->reason == MPV_END_FILE_REASON_ERROR) {
                         m_statusIndicator->setStatus(StatusIndicator::Offline);
                         statusBar()->showMessage("Playback error: " + m_currentChannelName);
@@ -652,15 +616,12 @@ private slots:
     }
 
     void checkOnlineStatus() {
-        QNetworkRequest req(QUrl(PLAYLIST_URL));
+        QUrl checkUrl(QString::fromLatin1(PLAYLIST_URL));
+        QNetworkRequest req;
+        req.setUrl(checkUrl);
         req.setRawHeader("User-Agent", "LiveTVPlayer/2.0");
         QNetworkReply* reply = m_nam->head(req);
-        connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-            if (reply->error() == QNetworkReply::NoError) {
-                if (m_statusIndicator->status() == StatusIndicator::Offline && m_currentStreamUrl.isEmpty()) {
-                    // We have network, but not playing
-                }
-            }
+        connect(reply, &QNetworkReply::finished, this, [reply]() {
             reply->deleteLater();
         });
     }
@@ -675,16 +636,12 @@ private slots:
 
     void enterFullscreen() {
         m_isFullscreen = true;
-        // Store splitter state
         m_savedSplitterState = m_vertSplitter->saveState();
-
-        // Hide channel list in vertical splitter, maximize video
         m_channelView->hide();
         m_leftPanel->hide();
         m_headerBar->hide();
-
         showFullScreen();
-        m_fullscreenBtn->setText("⊡");
+        m_fullscreenBtn->setText("Exit FS");
         m_fullscreenBtn->setToolTip("Exit Fullscreen (F11)");
         m_autoHideTimer->start();
     }
@@ -692,16 +649,13 @@ private slots:
     void exitFullscreen() {
         m_isFullscreen = false;
         m_autoHideTimer->stop();
-
         showNormal();
         showPanels();
         m_channelView->show();
-
         if (!m_savedSplitterState.isEmpty()) {
             m_vertSplitter->restoreState(m_savedSplitterState);
         }
-
-        m_fullscreenBtn->setText("⊞");
+        m_fullscreenBtn->setText("Fullscreen");
         m_fullscreenBtn->setToolTip("Fullscreen (F11)");
         setCursor(Qt::ArrowCursor);
     }
@@ -714,7 +668,6 @@ private:
         rootLayout->setContentsMargins(0, 0, 0, 0);
         rootLayout->setSpacing(0);
 
-        // ── Header Bar ──
         m_headerBar = new QWidget(central);
         m_headerBar->setFixedHeight(52);
         m_headerBar->setObjectName("headerBar");
@@ -722,16 +675,14 @@ private:
         headerLayout->setContentsMargins(16, 0, 16, 0);
         headerLayout->setSpacing(12);
 
-        // App icon / title
-        QLabel* appTitle = new QLabel("📺  Live TV", m_headerBar);
+        QLabel* appTitle = new QLabel("Live TV", m_headerBar);
         appTitle->setObjectName("appTitle");
         headerLayout->addWidget(appTitle);
 
         headerLayout->addSpacing(12);
 
-        // Search bar
         m_searchEdit = new QLineEdit(m_headerBar);
-        m_searchEdit->setPlaceholderText("🔍  Search channels…");
+        m_searchEdit->setPlaceholderText("Search channels...");
         m_searchEdit->setObjectName("searchEdit");
         m_searchEdit->setMaximumWidth(320);
         m_searchEdit->setMinimumWidth(180);
@@ -741,29 +692,25 @@ private:
 
         headerLayout->addStretch();
 
-        // Now playing label
         m_nowPlayingLabel = new QLabel("  No channel selected", m_headerBar);
         m_nowPlayingLabel->setObjectName("nowPlaying");
         headerLayout->addWidget(m_nowPlayingLabel);
 
         headerLayout->addStretch();
 
-        // Channel count
         m_channelCountLabel = new QLabel("0 channels", m_headerBar);
         m_channelCountLabel->setObjectName("channelCount");
         headerLayout->addWidget(m_channelCountLabel);
 
         headerLayout->addSpacing(8);
 
-        // Status indicator
         m_statusIndicator = new StatusIndicator(m_headerBar);
         m_statusIndicator->setStatus(StatusIndicator::Offline);
         headerLayout->addWidget(m_statusIndicator);
 
         headerLayout->addSpacing(8);
 
-        // Volume button area
-        QPushButton* volDown = new QPushButton("🔉", m_headerBar);
+        QPushButton* volDown = new QPushButton("-", m_headerBar);
         volDown->setObjectName("iconBtn");
         volDown->setFixedSize(32, 32);
         volDown->setToolTip("Volume Down");
@@ -776,7 +723,7 @@ private:
         m_volumeLabel->setAlignment(Qt::AlignCenter);
         headerLayout->addWidget(m_volumeLabel);
 
-        QPushButton* volUp = new QPushButton("🔊", m_headerBar);
+        QPushButton* volUp = new QPushButton("+", m_headerBar);
         volUp->setObjectName("iconBtn");
         volUp->setFixedSize(32, 32);
         volUp->setToolTip("Volume Up");
@@ -785,28 +732,24 @@ private:
 
         headerLayout->addSpacing(4);
 
-        // Fullscreen button
-        m_fullscreenBtn = new QPushButton("⊞", m_headerBar);
+        m_fullscreenBtn = new QPushButton("Fullscreen", m_headerBar);
         m_fullscreenBtn->setObjectName("iconBtn");
-        m_fullscreenBtn->setFixedSize(32, 32);
+        m_fullscreenBtn->setFixedHeight(32);
         m_fullscreenBtn->setToolTip("Fullscreen (F11)");
         connect(m_fullscreenBtn, &QPushButton::clicked, this, &MainWindow::toggleFullscreen);
         headerLayout->addWidget(m_fullscreenBtn);
 
         rootLayout->addWidget(m_headerBar);
 
-        // ── Separator ──
         QFrame* sep = new QFrame(central);
         sep->setFrameShape(QFrame::HLine);
         sep->setObjectName("headerSep");
         sep->setFixedHeight(1);
         rootLayout->addWidget(sep);
 
-        // ── Main Content ──
         QSplitter* hSplitter = new QSplitter(Qt::Horizontal, central);
         hSplitter->setObjectName("mainSplitter");
 
-        // Left panel - categories
         m_leftPanel = new QWidget(hSplitter);
         m_leftPanel->setObjectName("leftPanel");
         m_leftPanel->setMinimumWidth(170);
@@ -824,17 +767,15 @@ private:
         connect(m_categoryList, &QListWidget::currentRowChanged, this, &MainWindow::onCategoryChanged);
         leftLayout->addWidget(m_categoryList);
 
-        // Refresh button
-        QPushButton* refreshBtn = new QPushButton("↻  Refresh Playlist", m_leftPanel);
+        QPushButton* refreshBtn = new QPushButton("Refresh Playlist", m_leftPanel);
         refreshBtn->setObjectName("refreshBtn");
         connect(refreshBtn, &QPushButton::clicked, this, [this]() {
-            fetchPlaylist(PLAYLIST_URL);
+            fetchPlaylist(QString::fromLatin1(PLAYLIST_URL));
         });
         leftLayout->addWidget(refreshBtn);
 
         hSplitter->addWidget(m_leftPanel);
 
-        // Right side - video + channels
         QWidget* rightPanel = new QWidget(hSplitter);
         QVBoxLayout* rightLayout = new QVBoxLayout(rightPanel);
         rightLayout->setContentsMargins(0, 0, 0, 0);
@@ -848,7 +789,6 @@ private:
 
         m_vertSplitter->addWidget(m_videoWidget);
 
-        // Channel grid
         m_channelModel = new ChannelModel(this);
         m_proxyModel = new CategoryFilterProxy(this);
         m_proxyModel->setSourceModel(m_channelModel);
@@ -882,181 +822,161 @@ private:
         hSplitter->addWidget(rightPanel);
         hSplitter->setStretchFactor(0, 0);
         hSplitter->setStretchFactor(1, 1);
-        hSplitter->setSizes({200, 1080});
+        hSplitter->setSizes(QList<int>() << 200 << 1080);
 
         rootLayout->addWidget(hSplitter, 1);
 
-        // OSD
         m_osd = new OsdWidget(m_videoWidget);
         m_osd->setGeometry(m_videoWidget->rect());
 
-        // Status bar
-        statusBar()->showMessage("Loading playlist…");
+        statusBar()->showMessage("Loading playlist...");
     }
 
     void applyModernTheme() {
-        QString style = R"(
-            * {
-                font-family: 'Segoe UI', 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif;
-            }
-            QMainWindow, QWidget {
-                background-color: #0f0f1a;
-                color: #e2e8f0;
-            }
-
-            /* Header */
-            #headerBar {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #1a1a2e, stop:1 #16162a);
-                border-bottom: 1px solid rgba(255,255,255,0.06);
-            }
-            #appTitle {
-                font-size: 16px;
-                font-weight: 700;
-                color: #f1f5f9;
-                letter-spacing: 0.5px;
-            }
-            #searchEdit {
-                background-color: #1e1e35;
-                color: #e2e8f0;
-                border: 1px solid rgba(255,255,255,0.1);
-                border-radius: 8px;
-                padding: 6px 12px;
-                font-size: 13px;
-                selection-background-color: #6366f1;
-            }
-            #searchEdit:focus {
-                border: 1px solid #6366f1;
-                background-color: #222240;
-            }
-            #nowPlaying {
-                color: #a5b4fc;
-                font-size: 12px;
-                font-weight: 600;
-            }
-            #channelCount {
-                color: #64748b;
-                font-size: 11px;
-            }
-            #volumeLabel {
-                color: #94a3b8;
-                font-size: 11px;
-                font-weight: 600;
-            }
-            #iconBtn {
-                background: rgba(255,255,255,0.05);
-                border: 1px solid rgba(255,255,255,0.08);
-                border-radius: 6px;
-                color: #e2e8f0;
-                font-size: 14px;
-            }
-            #iconBtn:hover {
-                background: rgba(99,102,241,0.3);
-                border-color: rgba(99,102,241,0.5);
-            }
-            #iconBtn:pressed {
-                background: rgba(99,102,241,0.5);
-            }
-            #headerSep {
-                background-color: rgba(255,255,255,0.04);
-                border: none;
-            }
-
-            /* Left Panel */
-            #leftPanel {
-                background-color: #12121f;
-                border-right: 1px solid rgba(255,255,255,0.04);
-            }
-            #sectionTitle {
-                font-weight: 700;
-                font-size: 13px;
-                color: #94a3b8;
-                text-transform: uppercase;
-                letter-spacing: 1px;
-                padding: 4px 8px;
-            }
-            #categoryList {
-                background-color: transparent;
-                border: none;
-                outline: none;
-                font-size: 13px;
-            }
-            #categoryList::item {
-                padding: 8px 12px;
-                border-radius: 8px;
-                margin: 1px 4px;
-                color: #cbd5e1;
-            }
-            #categoryList::item:selected {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 rgba(99,102,241,0.35), stop:1 rgba(99,102,241,0.15));
-                color: #e0e7ff;
-                border-left: 3px solid #6366f1;
-            }
-            #categoryList::item:hover:!selected {
-                background-color: rgba(255,255,255,0.04);
-            }
-            #refreshBtn {
-                background: rgba(99,102,241,0.15);
-                border: 1px solid rgba(99,102,241,0.25);
-                border-radius: 8px;
-                color: #a5b4fc;
-                padding: 8px;
-                font-size: 12px;
-                font-weight: 600;
-            }
-            #refreshBtn:hover {
-                background: rgba(99,102,241,0.3);
-                color: #e0e7ff;
-            }
-
-            /* Channel Grid */
-            #channelGrid {
-                background-color: #0f0f1a;
-                border: none;
-                border-top: 1px solid rgba(255,255,255,0.04);
-            }
-
-            /* Splitter */
-            QSplitter::handle {
-                background-color: rgba(255,255,255,0.04);
-            }
-            QSplitter::handle:horizontal { width: 1px; }
-            QSplitter::handle:vertical { height: 4px; }
-            QSplitter::handle:hover {
-                background-color: rgba(99,102,241,0.4);
-            }
-
-            /* Status Bar */
-            QStatusBar {
-                background-color: #0a0a16;
-                color: #64748b;
-                font-size: 11px;
-                border-top: 1px solid rgba(255,255,255,0.04);
-                padding: 2px 12px;
-            }
-
-            /* Scrollbars */
-            QScrollBar:vertical {
-                background: transparent;
-                width: 8px;
-                margin: 0;
-            }
-            QScrollBar::handle:vertical {
-                background: rgba(148,163,184,0.2);
-                border-radius: 4px;
-                min-height: 30px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: rgba(148,163,184,0.35);
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0;
-            }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-                background: transparent;
-            }
-        )";
+        QString style =
+            "* {"
+            "  font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;"
+            "}"
+            "QMainWindow, QWidget {"
+            "  background-color: #0f0f1a;"
+            "  color: #e2e8f0;"
+            "}"
+            "#headerBar {"
+            "  background-color: #1a1a2e;"
+            "  border-bottom: 1px solid rgba(255,255,255,6%);"
+            "}"
+            "#appTitle {"
+            "  font-size: 16px;"
+            "  font-weight: bold;"
+            "  color: #f1f5f9;"
+            "}"
+            "#searchEdit {"
+            "  background-color: #1e1e35;"
+            "  color: #e2e8f0;"
+            "  border: 1px solid rgba(255,255,255,10%);"
+            "  border-radius: 8px;"
+            "  padding: 6px 12px;"
+            "  font-size: 13px;"
+            "  selection-background-color: #6366f1;"
+            "}"
+            "#searchEdit:focus {"
+            "  border: 1px solid #6366f1;"
+            "  background-color: #222240;"
+            "}"
+            "#nowPlaying {"
+            "  color: #a5b4fc;"
+            "  font-size: 12px;"
+            "  font-weight: bold;"
+            "}"
+            "#channelCount {"
+            "  color: #64748b;"
+            "  font-size: 11px;"
+            "}"
+            "#volumeLabel {"
+            "  color: #94a3b8;"
+            "  font-size: 11px;"
+            "  font-weight: bold;"
+            "}"
+            "#iconBtn {"
+            "  background: rgba(255,255,255,5%);"
+            "  border: 1px solid rgba(255,255,255,8%);"
+            "  border-radius: 6px;"
+            "  color: #e2e8f0;"
+            "  font-size: 13px;"
+            "  padding: 2px 8px;"
+            "}"
+            "#iconBtn:hover {"
+            "  background: rgba(99,102,241,30%);"
+            "  border-color: rgba(99,102,241,50%);"
+            "}"
+            "#iconBtn:pressed {"
+            "  background: rgba(99,102,241,50%);"
+            "}"
+            "#headerSep {"
+            "  background-color: rgba(255,255,255,4%);"
+            "  border: none;"
+            "}"
+            "#leftPanel {"
+            "  background-color: #12121f;"
+            "  border-right: 1px solid rgba(255,255,255,4%);"
+            "}"
+            "#sectionTitle {"
+            "  font-weight: bold;"
+            "  font-size: 13px;"
+            "  color: #94a3b8;"
+            "  padding: 4px 8px;"
+            "}"
+            "#categoryList {"
+            "  background-color: transparent;"
+            "  border: none;"
+            "  outline: none;"
+            "  font-size: 13px;"
+            "}"
+            "#categoryList::item {"
+            "  padding: 8px 12px;"
+            "  border-radius: 8px;"
+            "  margin: 1px 4px;"
+            "  color: #cbd5e1;"
+            "}"
+            "#categoryList::item:selected {"
+            "  background-color: rgba(99,102,241,35%);"
+            "  color: #e0e7ff;"
+            "}"
+            "#categoryList::item:hover {"
+            "  background-color: rgba(255,255,255,4%);"
+            "}"
+            "#refreshBtn {"
+            "  background: rgba(99,102,241,15%);"
+            "  border: 1px solid rgba(99,102,241,25%);"
+            "  border-radius: 8px;"
+            "  color: #a5b4fc;"
+            "  padding: 8px;"
+            "  font-size: 12px;"
+            "  font-weight: bold;"
+            "}"
+            "#refreshBtn:hover {"
+            "  background: rgba(99,102,241,30%);"
+            "  color: #e0e7ff;"
+            "}"
+            "#channelGrid {"
+            "  background-color: #0f0f1a;"
+            "  border: none;"
+            "  border-top: 1px solid rgba(255,255,255,4%);"
+            "}"
+            "QSplitter::handle {"
+            "  background-color: rgba(255,255,255,4%);"
+            "}"
+            "QSplitter::handle:horizontal { width: 1px; }"
+            "QSplitter::handle:vertical { height: 4px; }"
+            "QSplitter::handle:hover {"
+            "  background-color: rgba(99,102,241,40%);"
+            "}"
+            "QStatusBar {"
+            "  background-color: #0a0a16;"
+            "  color: #64748b;"
+            "  font-size: 11px;"
+            "  border-top: 1px solid rgba(255,255,255,4%);"
+            "  padding: 2px 12px;"
+            "}"
+            "QScrollBar:vertical {"
+            "  background: transparent;"
+            "  width: 8px;"
+            "  margin: 0;"
+            "}"
+            "QScrollBar::handle:vertical {"
+            "  background: rgba(148,163,184,20%);"
+            "  border-radius: 4px;"
+            "  min-height: 30px;"
+            "}"
+            "QScrollBar::handle:vertical:hover {"
+            "  background: rgba(148,163,184,35%);"
+            "}"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
+            "  height: 0;"
+            "}"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {"
+            "  background: transparent;"
+            "}";
         qApp->setStyleSheet(style);
     }
 
@@ -1130,11 +1050,11 @@ private:
         if (!url.isValid()) return;
 
         m_statusIndicator->setStatus(StatusIndicator::Connecting);
-        statusBar()->showMessage("Loading playlist…");
+        statusBar()->showMessage("Loading playlist...");
 
-        QNetworkRequest req(url);
+        QNetworkRequest req;
+        req.setUrl(url);
         req.setRawHeader("User-Agent", "LiveTVPlayer/2.0");
-        req.setAttribute(QNetworkRequest::FollowRedirectsAttribute, true);
 
         QNetworkReply* reply = m_nam->get(req);
 
@@ -1159,7 +1079,7 @@ private:
 
             if (reply->error() != QNetworkReply::NoError) {
                 m_statusIndicator->setStatus(StatusIndicator::Offline);
-                statusBar()->showMessage("Failed to load playlist – check your connection");
+                statusBar()->showMessage("Failed to load playlist - check connection");
                 reply->deleteLater();
                 return;
             }
@@ -1179,7 +1099,7 @@ private:
     void parseM3u(const QByteArray& data) {
         QVector<Channel> channels;
         QString text = QString::fromUtf8(data);
-        QStringList lines = text.split(QRegularExpression("[\\r\\n]+"), Qt::SkipEmptyParts);
+        QStringList lines = text.split(QRegularExpression("[\\r\\n]+"), QString::SkipEmptyParts);
 
         if (lines.isEmpty()) {
             statusBar()->showMessage("Empty playlist.");
@@ -1187,15 +1107,15 @@ private:
             return;
         }
 
-        QRegularExpression reExtInf(R"(#EXTINF\s*:\s*(-?\d+)\s*(.*),\s*(.*))");
-        QRegularExpression reLogo(R"(tvg-logo\s*=\s*"([^"]*)")");
-        QRegularExpression reGroup(R"(group-title\s*=\s*"([^"]*)")");
+        QRegularExpression reExtInf("^#EXTINF\\s*:\\s*(-?\\d+)\\s*(.*),\\s*(.*)$");
+        QRegularExpression reLogo("tvg-logo\\s*=\\s*\"([^\"]*)\"");
+        QRegularExpression reGroup("group-title\\s*=\\s*\"([^\"]*)\"");
 
         Channel pending;
         bool hasPending = false;
 
-        for (const QString& rawLine : lines) {
-            QString line = rawLine.trimmed();
+        for (int i = 0; i < lines.size(); ++i) {
+            QString line = lines[i].trimmed();
             if (line.isEmpty()) continue;
 
             if (line.startsWith("#EXTINF")) {
@@ -1224,6 +1144,7 @@ private:
                 if (pending.category.isEmpty()) pending.category = "Others";
                 if (pending.name.isEmpty()) pending.name = "Unknown";
                 hasPending = true;
+
             } else if (!line.startsWith("#")) {
                 if (hasPending) {
                     QUrl streamUrl(line);
@@ -1248,18 +1169,18 @@ private:
 
         m_channelModel->setChannels(channels);
 
-        // Build categories
         QSet<QString> catSet;
-        for (const auto& ch : channels) catSet.insert(ch.category);
-        QStringList cats = catSet.values();
+        for (int i = 0; i < channels.size(); ++i) {
+            catSet.insert(channels[i].category);
+        }
+        QStringList cats = catSet.toList();
         std::sort(cats.begin(), cats.end());
         cats.prepend("All");
 
         m_categoryList->blockSignals(true);
         m_categoryList->clear();
-        for (const auto& c : cats) {
-            QListWidgetItem* item = new QListWidgetItem(c);
-            m_categoryList->addItem(item);
+        for (int i = 0; i < cats.size(); ++i) {
+            m_categoryList->addItem(cats[i]);
         }
         m_categoryList->blockSignals(false);
 
@@ -1275,7 +1196,7 @@ private:
         m_categoryList->setCurrentRow(catIdx);
         onCategoryChanged(catIdx);
 
-        statusBar()->showMessage(QString("Loaded %1 channels · %2 categories").arg(channels.size()).arg(cats.size() - 1));
+        statusBar()->showMessage(QString("Loaded %1 channels in %2 categories").arg(channels.size()).arg(cats.size() - 1));
         if (m_currentStreamUrl.isEmpty()) {
             m_statusIndicator->setStatus(StatusIndicator::Online);
         }
@@ -1298,14 +1219,15 @@ private:
         m_logoPending.clear();
         m_activeLogoDownloads = 0;
 
-        const QVector<Channel>& channels = m_channelModel->channels();
+        const QVector<Channel>& ch = m_channelModel->channels();
         QSet<QString> queued;
-        for (const auto& ch : channels) {
-            if (!ch.logoUrl.isEmpty() && !m_logoPixmaps.contains(ch.logoUrl) && !queued.contains(ch.logoUrl)) {
-                QUrl u(ch.logoUrl);
+        for (int i = 0; i < ch.size(); ++i) {
+            const QString& logoUrl = ch[i].logoUrl;
+            if (!logoUrl.isEmpty() && !m_logoPixmaps.contains(logoUrl) && !queued.contains(logoUrl)) {
+                QUrl u(logoUrl);
                 if (u.isValid() && (u.scheme() == "http" || u.scheme() == "https")) {
-                    m_logoPending.append(ch.logoUrl);
-                    queued.insert(ch.logoUrl);
+                    m_logoPending.append(logoUrl);
+                    queued.insert(logoUrl);
                 }
             }
         }
@@ -1322,9 +1244,9 @@ private:
         QUrl url(urlStr);
         if (!url.isValid()) return;
 
-        QNetworkRequest req(url);
+        QNetworkRequest req;
+        req.setUrl(url);
         req.setRawHeader("User-Agent", "LiveTVPlayer/2.0");
-        req.setAttribute(QNetworkRequest::FollowRedirectsAttribute, true);
 
         QNetworkReply* reply = m_logoNam->get(req);
         m_activeLogoDownloads++;
@@ -1368,7 +1290,7 @@ private:
         }
 
         QByteArray urlBytes = url.toUtf8();
-        const char* cmd[] = {"loadfile", urlBytes.constData(), "replace", nullptr};
+        const char* cmd[] = {"loadfile", urlBytes.constData(), "replace", NULL};
         int err = mpv_command(m_mpv, cmd);
         if (err < 0) {
             statusBar()->showMessage(QString("mpv error: %1").arg(mpv_error_string(err)));
@@ -1415,55 +1337,54 @@ private:
         statusBar()->showMessage(pause ? "Paused" : "Playing", 2000);
     }
 
-    // ── Members ──
-    mpv_handle* m_mpv = nullptr;
-    bool m_mpvOk = false;
+    mpv_handle* m_mpv;
+    bool m_mpvOk;
 
-    QNetworkAccessManager* m_nam = nullptr;
-    QNetworkAccessManager* m_logoNam = nullptr;
-    int m_downloadedBytes = 0;
+    QNetworkAccessManager* m_nam;
+    QNetworkAccessManager* m_logoNam;
+    int m_downloadedBytes;
 
-    QWidget* m_headerBar = nullptr;
-    QWidget* m_leftPanel = nullptr;
-    QLineEdit* m_searchEdit = nullptr;
-    QLabel* m_nowPlayingLabel = nullptr;
-    QLabel* m_channelCountLabel = nullptr;
-    QLabel* m_volumeLabel = nullptr;
-    QPushButton* m_fullscreenBtn = nullptr;
-    StatusIndicator* m_statusIndicator = nullptr;
-    QListWidget* m_categoryList = nullptr;
-    QListView* m_channelView = nullptr;
-    VideoWidget* m_videoWidget = nullptr;
-    OsdWidget* m_osd = nullptr;
-    QSplitter* m_vertSplitter = nullptr;
+    QWidget* m_headerBar;
+    QWidget* m_leftPanel;
+    QLineEdit* m_searchEdit;
+    QLabel* m_nowPlayingLabel;
+    QLabel* m_channelCountLabel;
+    QLabel* m_volumeLabel;
+    QPushButton* m_fullscreenBtn;
+    StatusIndicator* m_statusIndicator;
+    QListWidget* m_categoryList;
+    QListView* m_channelView;
+    VideoWidget* m_videoWidget;
+    OsdWidget* m_osd;
+    QSplitter* m_vertSplitter;
 
-    ChannelModel* m_channelModel = nullptr;
-    CategoryFilterProxy* m_proxyModel = nullptr;
-    ChannelDelegate* m_delegate = nullptr;
+    ChannelModel* m_channelModel;
+    CategoryFilterProxy* m_proxyModel;
+    ChannelDelegate* m_delegate;
 
     QHash<QString, QPixmap> m_logoPixmaps;
     QStringList m_logoPending;
-    int m_activeLogoDownloads = 0;
+    int m_activeLogoDownloads;
 
-    QTimer* m_debounceTimer = nullptr;
-    QTimer* m_autoHideTimer = nullptr;
-    QTimer* m_searchDebounce = nullptr;
-    QTimer* m_statusCheckTimer = nullptr;
+    QTimer* m_debounceTimer;
+    QTimer* m_autoHideTimer;
+    QTimer* m_searchDebounce;
+    QTimer* m_statusCheckTimer;
 
     QString m_pendingStreamUrl;
     QString m_pendingChannelName;
     QString m_pendingCategory;
-    int m_pendingIndex = 0;
-    int m_pendingTotal = 0;
+    int m_pendingIndex;
+    int m_pendingTotal;
 
     QString m_currentChannelName;
     QString m_currentStreamUrl;
     QString m_currentCategory;
     QString m_lastStreamUrl;
 
-    int m_volume = 100;
-    bool m_muted = false;
-    bool m_isFullscreen = false;
+    int m_volume;
+    bool m_muted;
+    bool m_isFullscreen;
     QByteArray m_savedSplitterState;
 };
 
