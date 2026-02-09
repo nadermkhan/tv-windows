@@ -180,7 +180,6 @@ public:
         }
 
         painter->fillPath(path, cardBg);
-
         painter->setPen(QPen(QColor(255, 255, 255, 15), 1));
         painter->drawPath(path);
 
@@ -246,7 +245,7 @@ public:
     }
 
 private:
-    QHash<QString, QPixmap>* m_logoCache = nullptr;
+    QHash<QString, QPixmap>* m_logoCache;
 };
 
 class OsdWidget : public QWidget {
@@ -314,8 +313,8 @@ private:
     QTimer* m_hideTimer;
     QString m_channelName;
     QString m_category;
-    int m_index = 0;
-    int m_total = 0;
+    int m_index;
+    int m_total;
 };
 
 class VideoWidget : public QWidget {
@@ -425,7 +424,18 @@ private:
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
-    explicit MainWindow(QWidget* parent = nullptr) : QMainWindow(parent) {
+    explicit MainWindow(QWidget* parent = nullptr) : QMainWindow(parent),
+        m_mpv(NULL), m_mpvOk(false), m_nam(NULL), m_logoNam(NULL),
+        m_downloadedBytes(0), m_headerBar(NULL), m_leftPanel(NULL),
+        m_searchEdit(NULL), m_nowPlayingLabel(NULL), m_channelCountLabel(NULL),
+        m_volumeLabel(NULL), m_fullscreenBtn(NULL), m_statusIndicator(NULL),
+        m_categoryList(NULL), m_channelView(NULL), m_videoWidget(NULL),
+        m_osd(NULL), m_vertSplitter(NULL), m_channelModel(NULL),
+        m_proxyModel(NULL), m_delegate(NULL), m_activeLogoDownloads(0),
+        m_debounceTimer(NULL), m_autoHideTimer(NULL), m_searchDebounce(NULL),
+        m_statusCheckTimer(NULL), m_pendingIndex(0), m_pendingTotal(0),
+        m_volume(100), m_muted(false), m_isFullscreen(false)
+    {
         setWindowTitle("Live TV Player");
         resize(1280, 720);
         setMinimumSize(900, 550);
@@ -453,8 +463,8 @@ public:
         connect(m_statusCheckTimer, &QTimer::timeout, this, &MainWindow::checkOnlineStatus);
 
         setupUi();
-        setupMpv();
         loadSettings();
+        setupMpv();
         applyModernTheme();
 
         QTimer::singleShot(300, this, [this]() {
@@ -468,7 +478,7 @@ public:
         saveSettings();
         if (m_mpv) {
             mpv_terminate_destroy(m_mpv);
-            m_mpv = nullptr;
+            m_mpv = NULL;
         }
     }
 
@@ -710,25 +720,34 @@ private:
 
         headerLayout->addSpacing(8);
 
-        QPushButton* volDown = new QPushButton("-", m_headerBar);
+        QPushButton* volDown = new QPushButton("Vol-", m_headerBar);
         volDown->setObjectName("iconBtn");
-        volDown->setFixedSize(32, 32);
-        volDown->setToolTip("Volume Down");
+        volDown->setFixedSize(40, 32);
+        volDown->setToolTip("Volume Down (Left Arrow)");
         connect(volDown, &QPushButton::clicked, this, [this]() { changeVolume(-5); });
         headerLayout->addWidget(volDown);
 
         m_volumeLabel = new QLabel("100%", m_headerBar);
         m_volumeLabel->setObjectName("volumeLabel");
-        m_volumeLabel->setFixedWidth(40);
+        m_volumeLabel->setFixedWidth(44);
         m_volumeLabel->setAlignment(Qt::AlignCenter);
         headerLayout->addWidget(m_volumeLabel);
 
-        QPushButton* volUp = new QPushButton("+", m_headerBar);
+        QPushButton* volUp = new QPushButton("Vol+", m_headerBar);
         volUp->setObjectName("iconBtn");
-        volUp->setFixedSize(32, 32);
-        volUp->setToolTip("Volume Up");
+        volUp->setFixedSize(40, 32);
+        volUp->setToolTip("Volume Up (Right Arrow)");
         connect(volUp, &QPushButton::clicked, this, [this]() { changeVolume(5); });
         headerLayout->addWidget(volUp);
+
+        headerLayout->addSpacing(4);
+
+        QPushButton* muteBtn = new QPushButton("Mute", m_headerBar);
+        muteBtn->setObjectName("iconBtn");
+        muteBtn->setFixedSize(44, 32);
+        muteBtn->setToolTip("Toggle Mute (M)");
+        connect(muteBtn, &QPushButton::clicked, this, [this]() { toggleMute(); });
+        headerLayout->addWidget(muteBtn);
 
         headerLayout->addSpacing(4);
 
@@ -843,7 +862,6 @@ private:
             "}"
             "#headerBar {"
             "  background-color: #1a1a2e;"
-            "  border-bottom: 1px solid rgba(255,255,255,6%);"
             "}"
             "#appTitle {"
             "  font-size: 16px;"
@@ -853,11 +871,10 @@ private:
             "#searchEdit {"
             "  background-color: #1e1e35;"
             "  color: #e2e8f0;"
-            "  border: 1px solid rgba(255,255,255,10%);"
+            "  border: 1px solid rgba(255,255,255,25);"
             "  border-radius: 8px;"
             "  padding: 6px 12px;"
             "  font-size: 13px;"
-            "  selection-background-color: #6366f1;"
             "}"
             "#searchEdit:focus {"
             "  border: 1px solid #6366f1;"
@@ -878,27 +895,26 @@ private:
             "  font-weight: bold;"
             "}"
             "#iconBtn {"
-            "  background: rgba(255,255,255,5%);"
-            "  border: 1px solid rgba(255,255,255,8%);"
+            "  background: rgba(255,255,255,12);"
+            "  border: 1px solid rgba(255,255,255,20);"
             "  border-radius: 6px;"
             "  color: #e2e8f0;"
-            "  font-size: 13px;"
+            "  font-size: 12px;"
             "  padding: 2px 8px;"
             "}"
             "#iconBtn:hover {"
-            "  background: rgba(99,102,241,30%);"
-            "  border-color: rgba(99,102,241,50%);"
+            "  background: rgba(99,102,241,80);"
+            "  border-color: rgba(99,102,241,130);"
             "}"
             "#iconBtn:pressed {"
-            "  background: rgba(99,102,241,50%);"
+            "  background: rgba(99,102,241,130);"
             "}"
             "#headerSep {"
-            "  background-color: rgba(255,255,255,4%);"
+            "  background-color: rgba(255,255,255,10);"
             "  border: none;"
             "}"
             "#leftPanel {"
             "  background-color: #12121f;"
-            "  border-right: 1px solid rgba(255,255,255,4%);"
             "}"
             "#sectionTitle {"
             "  font-weight: bold;"
@@ -919,15 +935,15 @@ private:
             "  color: #cbd5e1;"
             "}"
             "#categoryList::item:selected {"
-            "  background-color: rgba(99,102,241,35%);"
+            "  background-color: rgba(99,102,241,90);"
             "  color: #e0e7ff;"
             "}"
             "#categoryList::item:hover {"
-            "  background-color: rgba(255,255,255,4%);"
+            "  background-color: rgba(255,255,255,10);"
             "}"
             "#refreshBtn {"
-            "  background: rgba(99,102,241,15%);"
-            "  border: 1px solid rgba(99,102,241,25%);"
+            "  background: rgba(99,102,241,40);"
+            "  border: 1px solid rgba(99,102,241,65);"
             "  border-radius: 8px;"
             "  color: #a5b4fc;"
             "  padding: 8px;"
@@ -935,27 +951,25 @@ private:
             "  font-weight: bold;"
             "}"
             "#refreshBtn:hover {"
-            "  background: rgba(99,102,241,30%);"
+            "  background: rgba(99,102,241,80);"
             "  color: #e0e7ff;"
             "}"
             "#channelGrid {"
             "  background-color: #0f0f1a;"
             "  border: none;"
-            "  border-top: 1px solid rgba(255,255,255,4%);"
             "}"
             "QSplitter::handle {"
-            "  background-color: rgba(255,255,255,4%);"
+            "  background-color: rgba(255,255,255,10);"
             "}"
             "QSplitter::handle:horizontal { width: 1px; }"
             "QSplitter::handle:vertical { height: 4px; }"
             "QSplitter::handle:hover {"
-            "  background-color: rgba(99,102,241,40%);"
+            "  background-color: rgba(99,102,241,100);"
             "}"
             "QStatusBar {"
             "  background-color: #0a0a16;"
             "  color: #64748b;"
             "  font-size: 11px;"
-            "  border-top: 1px solid rgba(255,255,255,4%);"
             "  padding: 2px 12px;"
             "}"
             "QScrollBar:vertical {"
@@ -964,12 +978,12 @@ private:
             "  margin: 0;"
             "}"
             "QScrollBar::handle:vertical {"
-            "  background: rgba(148,163,184,20%);"
+            "  background: rgba(148,163,184,50);"
             "  border-radius: 4px;"
             "  min-height: 30px;"
             "}"
             "QScrollBar::handle:vertical:hover {"
-            "  background: rgba(148,163,184,35%);"
+            "  background: rgba(148,163,184,90);"
             "}"
             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
             "  height: 0;"
@@ -988,20 +1002,45 @@ private:
             return;
         }
 
-        mpv_set_option_string(m_mpv, "hwdec", "auto");
+        // Video output
         mpv_set_option_string(m_mpv, "vo", "gpu");
+        mpv_set_option_string(m_mpv, "hwdec", "auto-safe");
+
+        // Audio output - try multiple backends
+#ifdef Q_OS_WIN
+        mpv_set_option_string(m_mpv, "ao", "wasapi,sdl,openal");
+#elif defined(Q_OS_LINUX)
+        mpv_set_option_string(m_mpv, "ao", "pulse,alsa,sdl");
+#elif defined(Q_OS_MAC)
+        mpv_set_option_string(m_mpv, "ao", "coreaudio,sdl");
+#else
+        mpv_set_option_string(m_mpv, "ao", "auto");
+#endif
+
+        // Audio settings - ensure audio is not disabled
+        mpv_set_option_string(m_mpv, "audio", "yes");
+        mpv_set_option_string(m_mpv, "mute", "no");
+
+        // Set initial volume before init
+        QByteArray volStr = QString::number(m_volume).toUtf8();
+        mpv_set_option_string(m_mpv, "volume", volStr.constData());
+
+        // General playback
         mpv_set_option_string(m_mpv, "keep-open", "yes");
         mpv_set_option_string(m_mpv, "idle", "yes");
         mpv_set_option_string(m_mpv, "input-default-bindings", "no");
         mpv_set_option_string(m_mpv, "input-vo-keyboard", "no");
         mpv_set_option_string(m_mpv, "osc", "no");
         mpv_set_option_string(m_mpv, "osd-level", "0");
+
+        // Network/cache
         mpv_set_option_string(m_mpv, "cache", "yes");
         mpv_set_option_string(m_mpv, "demuxer-max-bytes", "50MiB");
         mpv_set_option_string(m_mpv, "demuxer-max-back-bytes", "10MiB");
         mpv_set_option_string(m_mpv, "cache-secs", "10");
         mpv_set_option_string(m_mpv, "network-timeout", "15");
 
+        // Embed video into our widget
         int64_t wid = static_cast<int64_t>(m_videoWidget->winId());
         mpv_set_option(m_mpv, "wid", MPV_FORMAT_INT64, &wid);
 
@@ -1009,29 +1048,41 @@ private:
         if (err < 0) {
             QMessageBox::critical(this, "Error", QString("mpv init failed: %1").arg(mpv_error_string(err)));
             mpv_terminate_destroy(m_mpv);
-            m_mpv = nullptr;
+            m_mpv = NULL;
             m_mpvOk = false;
             return;
         }
+
+        // Set properties AFTER initialization
+        // Volume must be set as property after init for reliable behavior
+        int64_t vol = m_volume;
+        mpv_set_property(m_mpv, "volume", MPV_FORMAT_INT64, &vol);
+
+        // Ensure audio is not muted
+        int muteFlag = m_muted ? 1 : 0;
+        mpv_set_property(m_mpv, "mute", MPV_FORMAT_FLAG, &muteFlag);
+
+        // Set audio device to auto
+        mpv_set_property_string(m_mpv, "audio-device", "auto");
+
+        // Observe audio properties for debugging
+        mpv_observe_property(m_mpv, 0, "volume", MPV_FORMAT_DOUBLE);
+        mpv_observe_property(m_mpv, 0, "mute", MPV_FORMAT_FLAG);
+        mpv_observe_property(m_mpv, 0, "audio-device", MPV_FORMAT_STRING);
 
         mpv_set_wakeup_callback(m_mpv, [](void* ctx) {
             QMetaObject::invokeMethod(static_cast<MainWindow*>(ctx), "onMpvWakeup", Qt::QueuedConnection);
         }, this);
 
         m_mpvOk = true;
-
-        if (m_volume >= 0) {
-            mpv_set_property_string(m_mpv, "volume", QString::number(m_volume).toUtf8().constData());
-        }
-        if (m_muted) {
-            mpv_set_property_string(m_mpv, "mute", "yes");
-        }
     }
 
     void loadSettings() {
         QSettings s("LiveTVPlayer", "LiveTVPlayer");
         m_currentCategory = s.value("lastCategory", "All").toString();
         m_volume = s.value("volume", 100).toInt();
+        if (m_volume < 0) m_volume = 0;
+        if (m_volume > 150) m_volume = 150;
         m_muted = s.value("muted", false).toBool();
         m_lastStreamUrl = s.value("lastStream", "").toString();
         updateVolumeLabel();
@@ -1289,6 +1340,16 @@ private:
             return;
         }
 
+        // Ensure audio is enabled before each playback
+        int muteOff = 0;
+        if (!m_muted) {
+            mpv_set_property(m_mpv, "mute", MPV_FORMAT_FLAG, &muteOff);
+        }
+
+        // Re-apply volume before playback
+        int64_t vol = m_volume;
+        mpv_set_property(m_mpv, "volume", MPV_FORMAT_INT64, &vol);
+
         QByteArray urlBytes = url.toUtf8();
         const char* cmd[] = {"loadfile", urlBytes.constData(), "replace", NULL};
         int err = mpv_command(m_mpv, cmd);
@@ -1314,7 +1375,15 @@ private:
     void changeVolume(int delta) {
         m_volume = qBound(0, m_volume + delta, 150);
         if (m_mpv && m_mpvOk) {
-            mpv_set_property_string(m_mpv, "volume", QString::number(m_volume).toUtf8().constData());
+            int64_t vol = m_volume;
+            mpv_set_property(m_mpv, "volume", MPV_FORMAT_INT64, &vol);
+
+            // If changing volume, unmute
+            if (m_muted && delta > 0) {
+                m_muted = false;
+                int muteFlag = 0;
+                mpv_set_property(m_mpv, "mute", MPV_FORMAT_FLAG, &muteFlag);
+            }
         }
         updateVolumeLabel();
         statusBar()->showMessage(QString("Volume: %1%").arg(m_volume), 2000);
@@ -1323,7 +1392,8 @@ private:
     void toggleMute() {
         m_muted = !m_muted;
         if (m_mpv && m_mpvOk) {
-            mpv_set_property_string(m_mpv, "mute", m_muted ? "yes" : "no");
+            int muteFlag = m_muted ? 1 : 0;
+            mpv_set_property(m_mpv, "mute", MPV_FORMAT_FLAG, &muteFlag);
         }
         statusBar()->showMessage(m_muted ? "Muted" : "Unmuted", 2000);
     }
